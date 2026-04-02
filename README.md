@@ -18,7 +18,7 @@ It supports:
 
 - `src/matchmaking_data/generator.py`: canonical profile generation and profile expansion
 - `src/matchmaking_data/embedder.py`: local Hugging Face embedding backend and helpers
-- `src/matchmaking_data/redis_loader.py`: Redis JSON load, index creation, and query helpers
+- `src/matchmaking_data/redis_loader.py`: Redis hash load, index creation, and query helpers
 - `src/matchmaking_data/cli.py`: command-line entrypoint
 - `scripts/compare_vector_queries.py`: ad hoc query timing and recall comparison script
 - `tests/`: unit and optional integration tests
@@ -30,16 +30,16 @@ Requirements:
 - Python 3.9+
 - A Redis Cloud database with vector search enabled
 
-Example Redis endpoint:
+Example Redis Cloud endpoint:
 
 ```text
-redis-15027.internal.c58799.us-west-2-mz.ec2.cloud.rlrcp.com:15027
+redis-xxxxx.cyyyyy.us-west-2-mz.ec2.cloud.rlrcp.com:15027
 ```
 
 Set the connection string before running the commands below:
 
 ```bash
-export REDIS_URL=redis://redis-15027.internal.c58799.us-west-2-mz.ec2.cloud.rlrcp.com:15027
+export REDIS_URL="redis://default:<password>@redis-xxxxx.cyyyyy.us-west-2-mz.ec2.cloud.rlrcp.com:15027"
 ```
 
 Install system packages:
@@ -73,6 +73,18 @@ python3 -m matchmaking_data.cli load \
   --canonical-profile-count 1000 \
   --duplication-factor-max 10 \
   --batch-size 200
+```
+
+Load a small sample with the threaded loader:
+
+```bash
+python3 -m matchmaking_data.cli load-threaded \
+  --total-players 10000 \
+  --canonical-profile-count 1000 \
+  --duplication-factor-max 10 \
+  --batch-size 500 \
+  --profile-batch-size 64 \
+  --workers 8
 ```
 
 Run the full load:
@@ -130,6 +142,16 @@ Compare one query across multiple `EF_RUNTIME` values:
 
 ```bash
 python3 scripts/compare_vector_queries.py --samples 10
+```
+
+Compare unfiltered, prefilter, and post-filter query shapes against Redis Cloud:
+
+```bash
+python3 scripts/compare_vector_queries.py \
+  --redis-url "$REDIS_URL" \
+  --samples 5 \
+  --k 50 \
+  --aggregate-limit 10000
 ```
 
 ## Notes

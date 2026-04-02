@@ -53,6 +53,7 @@ class RedisLoaderUnitTests(unittest.TestCase):
         self.assertIn("DIM 64", joined)
         self.assertIn("ON HASH", joined)
         self.assertIn("binary TAG", joined)
+        self.assertIn("binary TAG SORTABLE UNF", joined)
         self.assertNotIn("$.player_id", joined)
 
     def test_load_batch_omits_player_id_from_json_payload(self):

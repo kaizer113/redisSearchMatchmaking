@@ -67,6 +67,8 @@ def create_index(client, config: PipelineConfig) -> None:
         "TAG",
         "binary",
         "TAG",
+        "SORTABLE",
+        "UNF",
         "embedding",
         "VECTOR",
         config.vector_algorithm,
@@ -155,7 +157,7 @@ def verify_redis_stack(client) -> None:
                         else:
                             module_names.append(str(raw_name))
         raise RuntimeError(
-            "Redis Stack modules not detected on localhost:6379. "
+            f"Required Redis modules not detected on {client.connection_pool.connection_kwargs.get('host', 'the configured Redis server')}. "
             "Expected RediSearch and RedisJSON, found: "
             + (", ".join(module_names) if module_names else "none")
         )

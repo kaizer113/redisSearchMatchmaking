@@ -20,6 +20,7 @@ from matchmaking_data.redis_loader import (
     load_batch,
     verify_redis_stack,
 )
+from matchmaking_data.threaded_loader import load_dataset_threaded
 
 
 def _build_config(args: argparse.Namespace) -> PipelineConfig:
@@ -62,20 +63,33 @@ def _decode_hash(data: Dict[bytes, bytes]) -> Dict[str, str]:
     return decoded
 
 
-def _load_progress_key(config: PipelineConfig) -> str:
-    return f"{config.load_progress_key}:{config.dataset_version}"
+def _load_progress_key(config: PipelineConfig, suffix: Optional[str] = None) -> str:
+    key = f"{config.load_progress_key}:{config.dataset_version}"
+    if suffix:
+        return f"{key}:{suffix}"
+    return key
 
 
-def _read_load_checkpoint(client, config: PipelineConfig) -> Optional[Dict[str, str]]:
-    data = client.hgetall(_load_progress_key(config))
+def _read_load_checkpoint(
+    client,
+    config: PipelineConfig,
+    suffix: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    data = client.hgetall(_load_progress_key(config, suffix=suffix))
     if not data:
         return None
     return _decode_hash(data)
 
 
-def _write_load_checkpoint(client, config: PipelineConfig, next_player_id: int, status: str) -> None:
+def _write_load_checkpoint(
+    client,
+    config: PipelineConfig,
+    next_player_id: int,
+    status: str,
+    suffix: Optional[str] = None,
+) -> None:
     client.hset(
-        _load_progress_key(config),
+        _load_progress_key(config, suffix=suffix),
         mapping={
             "dataset_version": config.dataset_version,
             "total_players": str(config.total_players),
@@ -154,6 +168,77 @@ def cmd_load(args: argparse.Namespace) -> int:
             print(f"Loaded {next_player_id}/{config.total_players} players", file=sys.stderr)
     _write_load_checkpoint(client, config, config.total_players, "completed")
     print(f"Finished loading {config.total_players} players")
+    return 0
+
+
+def cmd_load_threaded(args: argparse.Namespace) -> int:
+    config = _build_config(args)
+    config.validate()
+    if args.workers <= 0:
+        raise SystemExit("--workers must be positive")
+    if args.profile_batch_size <= 0:
+        raise SystemExit("--profile-batch-size must be positive")
+    client = get_redis_client(config.redis_url)
+    verify_redis_stack(client)
+    create_index(client, config)
+
+    checkpoint_suffix = "threaded"
+    checkpoint = _read_load_checkpoint(client, config, suffix=checkpoint_suffix) if args.resume else None
+    if checkpoint:
+        if checkpoint.get("dataset_version") != config.dataset_version:
+            raise SystemExit("Checkpoint dataset_version does not match current dataset version")
+        if checkpoint.get("total_players") != str(config.total_players):
+            raise SystemExit("Checkpoint total_players does not match current load arguments")
+        if checkpoint.get("duplication_factor_max") != str(config.duplication_factor_max):
+            raise SystemExit("Checkpoint duplication_factor_max does not match current load arguments")
+        if checkpoint.get("random_seed") != str(config.random_seed):
+            raise SystemExit("Checkpoint random_seed does not match current load arguments")
+        effective_start_player_id = int(checkpoint["next_player_id"])
+    else:
+        effective_start_player_id = args.start_player_id
+
+    if effective_start_player_id >= config.total_players:
+        print(f"Threaded dataset load already complete at player {effective_start_player_id}")
+        return 0
+
+    remaining_players = config.total_players - effective_start_player_id
+    start_profile_id = effective_start_player_id // config.duplication_factor_max
+    start_variant_offset = effective_start_player_id % config.duplication_factor_max
+    profile_count = int(
+        math.ceil((remaining_players + start_variant_offset) / float(config.duplication_factor_max))
+    )
+
+    _write_load_checkpoint(
+        client,
+        config,
+        effective_start_player_id,
+        "running",
+        suffix=checkpoint_suffix,
+    )
+    load_dataset_threaded(
+        config=config,
+        effective_start_player_id=effective_start_player_id,
+        profile_count=profile_count,
+        start_profile_id=start_profile_id,
+        profile_batch_size=args.profile_batch_size,
+        workers=args.workers,
+        write_checkpoint=lambda next_player_id, status: _write_load_checkpoint(
+            client,
+            config,
+            next_player_id,
+            status,
+            suffix=checkpoint_suffix,
+        ),
+        progress_stream=sys.stderr,
+    )
+    _write_load_checkpoint(
+        client,
+        config,
+        config.total_players,
+        "completed",
+        suffix=checkpoint_suffix,
+    )
+    print(f"Finished threaded loading of {config.total_players} players")
     return 0
 
 
@@ -264,6 +349,23 @@ def build_parser() -> argparse.ArgumentParser:
     load_parser.add_argument("--start-player-id", type=int, default=0)
     load_parser.add_argument("--resume", action="store_true")
     load_parser.set_defaults(func=cmd_load)
+
+    threaded_load_parser = subparsers.add_parser("load-threaded", parents=[common])
+    threaded_load_parser.add_argument("--start-player-id", type=int, default=0)
+    threaded_load_parser.add_argument("--resume", action="store_true")
+    threaded_load_parser.add_argument(
+        "--workers",
+        type=int,
+        default=max((os.cpu_count() or 2) // 2, 2),
+        help="Number of worker threads. Each worker keeps its own Redis client and embedding backend.",
+    )
+    threaded_load_parser.add_argument(
+        "--profile-batch-size",
+        type=int,
+        default=64,
+        help="Canonical profiles processed per threaded task.",
+    )
+    threaded_load_parser.set_defaults(func=cmd_load_threaded)
 
     query_parser = subparsers.add_parser("query", parents=[common])
     query_parser.add_argument("--text", required=True)
