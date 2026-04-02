@@ -141,6 +141,51 @@ def summarize(values):
     }
 
 
+def format_query_examples(index_name: str, k: int, aggregate_limit: int, binary_query_value: str) -> list:
+    return [
+        (
+            "unfiltered",
+            f'FT.SEARCH {index_name} "*=>[KNN {k} @embedding $vector EF_RUNTIME 64 AS score]" '
+            f"PARAMS 2 vector <256-byte-vector> SORTBY score ASC NOCONTENT LIMIT 0 {k} DIALECT 2"
+        ),
+        (
+            "prefilter",
+            f'FT.SEARCH {index_name} "@binary:{{{binary_query_value}}}=>[KNN {k} @embedding $vector EF_RUNTIME 64 AS score]" '
+            f"PARAMS 2 vector <256-byte-vector> SORTBY score ASC NOCONTENT LIMIT 0 {k} DIALECT 2"
+        ),
+        (
+            "postfilter",
+            f'FT.AGGREGATE {index_name} "*=>[KNN {aggregate_limit} @embedding $vector EF_RUNTIME 64 AS score]" '
+            f'PARAMS 2 vector <256-byte-vector> LOAD 3 __key @binary @score FILTER "@binary==\'<binary>\'" '
+            f"SORTBY 2 @score ASC LIMIT 0 {k} DIALECT 2"
+        ),
+    ]
+
+
+def print_summary(aggregate, ef_values):
+    print("summary")
+    header = (
+        f"{'mode':<14} {'ef':>4} {'avg':>10} {'p50':>10} {'p95':>10} "
+        f"{'recall_avg':>12} {'recall_min':>12}"
+    )
+    print(header)
+    print("-" * len(header))
+    mode_labels = {
+        "unfiltered": "unfiltered",
+        "filtered_pre": "prefilter",
+        "filtered_post": "postfilter",
+    }
+    for mode in ["unfiltered", "filtered_pre", "filtered_post"]:
+        for ef_runtime in ef_values:
+            time_summary = summarize(aggregate[mode][ef_runtime]["times"])
+            recall_summary = summarize(aggregate[mode][ef_runtime]["recalls"])
+            print(
+                f"{mode_labels[mode]:<14} {ef_runtime:>4} "
+                f"{time_summary['avg']:>10.2f} {time_summary['p50']:>10.2f} {time_summary['p95']:>10.2f} "
+                f"{recall_summary['avg'] * 100:>11.2f}% {recall_summary['min'] * 100:>11.2f}%"
+            )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compare unfiltered and binary-filtered vector queries")
     parser.add_argument("--redis-url", default=os.getenv("REDIS_URL", "redis://localhost:6379"))
@@ -169,6 +214,7 @@ def main() -> int:
         while len(sample_player_ids) < args.samples:
             sample_player_ids.append(randomizer.randrange(0, args.max_player_id))
 
+    printed_examples = False
     for sample_index, player_id in enumerate(sample_player_ids, start=1):
         key = f"player:{player_id}"
         vector = client.hget(key, "embedding")
@@ -181,15 +227,29 @@ def main() -> int:
 
         binary_text = binary.decode("utf-8")
         escaped_binary = escape_tag_value(binary_text)
+        aggregate_limit = args.aggregate_limit or args.k
 
-        print(f"sample={sample_index} player_id={player_id} binary={binary_text}")
+        if not printed_examples:
+            print("example queries")
+            for label, query in format_query_examples(
+                args.index_name,
+                args.k,
+                aggregate_limit,
+                escaped_binary,
+            ):
+                if label == "postfilter":
+                    query = query.replace("<binary>", binary_text)
+                print(f"  {label:<10} {query}")
+            print()
+            printed_examples = True
+
+        print(f"sample {sample_index:>2}  player_id={player_id}  binary={binary_text}")
         reference_unfiltered_ids = None
         reference_filtered_pre_ids = None
         reference_filtered_post_ids = None
 
         for ef_runtime in ef_values:
             limit = args.k
-            aggregate_limit = args.aggregate_limit or args.k
             unfiltered_query = (
                 f"*=>[KNN {args.k} @embedding $vector EF_RUNTIME {ef_runtime} AS score]"
             )
@@ -211,13 +271,7 @@ def main() -> int:
             else:
                 _, recall = overlap(reference_unfiltered_ids, ids)
             aggregate["unfiltered"][ef_runtime]["recalls"].append(recall)
-            print(
-                f"  unfiltered ef={ef_runtime} matches={matches} time_ms={elapsed_ms:.2f} recall_vs_128={recall:.2%}"
-            )
-            print(
-                f"    FT.SEARCH {args.index_name} \"{unfiltered_query}\" "
-                f"PARAMS 2 vector <256-byte-vector> SORTBY score ASC NOCONTENT LIMIT 0 {limit} DIALECT 2"
-            )
+            print(f"  {'unfiltered':<12} ef={ef_runtime:<3} matches={matches:>3} time_ms={elapsed_ms:>8.2f} recall_vs_128={recall:>7.2%}")
 
             matches, elapsed_ms, ids = run_search_query(
                 client, args.index_name, filtered_pre_query, vector, limit
@@ -229,13 +283,7 @@ def main() -> int:
             else:
                 _, recall = overlap(reference_filtered_pre_ids, ids)
             aggregate["filtered_pre"][ef_runtime]["recalls"].append(recall)
-            print(
-                f"  filtered_pre  ef={ef_runtime} matches={matches} time_ms={elapsed_ms:.2f} recall_vs_128={recall:.2%}"
-            )
-            print(
-                f"    FT.SEARCH {args.index_name} \"{filtered_pre_query}\" "
-                f"PARAMS 2 vector <256-byte-vector> SORTBY score ASC NOCONTENT LIMIT 0 {limit} DIALECT 2"
-            )
+            print(f"  {'prefilter':<12} ef={ef_runtime:<3} matches={matches:>3} time_ms={elapsed_ms:>8.2f} recall_vs_128={recall:>7.2%}")
 
             matches, elapsed_ms, ids, filter_expr, rows = run_aggregate_query(
                 client,
@@ -252,34 +300,13 @@ def main() -> int:
             else:
                 _, recall = overlap(reference_filtered_post_ids, ids)
             aggregate["filtered_post"][ef_runtime]["recalls"].append(recall)
-            print(
-                f"  filtered_post ef={ef_runtime} matches={matches} time_ms={elapsed_ms:.2f} recall_vs_128={recall:.2%}"
-            )
-            print(
-                f"    FT.AGGREGATE {args.index_name} \"{filtered_post_query}\" "
-                f"PARAMS 2 vector <256-byte-vector> LOAD 3 __key @binary @score FILTER \"{filter_expr}\" "
-                f"SORTBY 2 @score ASC "
-                f"LIMIT 0 {limit} DIALECT 2"
-            )
+            print(f"  {'postfilter':<12} ef={ef_runtime:<3} matches={matches:>3} time_ms={elapsed_ms:>8.2f} recall_vs_128={recall:>7.2%}")
             if rows:
                 preview = rows[: min(3, len(rows))]
-                print(f"    aggregate_preview={preview}")
+                print(f"    preview {preview}")
         print()
 
-    print("summary")
-    for mode in ["unfiltered", "filtered_pre", "filtered_post"]:
-        print(mode)
-        for ef_runtime in ef_values:
-            time_summary = summarize(aggregate[mode][ef_runtime]["times"])
-            recall_summary = summarize(aggregate[mode][ef_runtime]["recalls"])
-            print(
-                f"  ef={ef_runtime} "
-                f"time_avg_ms={time_summary['avg']:.2f} "
-                f"time_p50_ms={time_summary['p50']:.2f} "
-                f"time_p95_ms={time_summary['p95']:.2f} "
-                f"recall_avg={recall_summary['avg']:.2%} "
-                f"recall_min={recall_summary['min']:.2%}"
-            )
+    print_summary(aggregate, ef_values)
     return 0
 
 
