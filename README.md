@@ -28,7 +28,19 @@ It supports:
 Requirements:
 - Ubuntu 22.04 or newer
 - Python 3.9+
-- Redis Stack on `localhost:6379`
+- A Redis Cloud database with vector search enabled
+
+Example Redis endpoint:
+
+```text
+redis-15027.internal.c58799.us-west-2-mz.ec2.cloud.rlrcp.com:15027
+```
+
+Set the connection string before running the commands below:
+
+```bash
+export REDIS_URL=redis://redis-15027.internal.c58799.us-west-2-mz.ec2.cloud.rlrcp.com:15027
+```
 
 Install system packages:
 
