@@ -20,6 +20,8 @@ class PipelineConfig:
     random_seed: int = 1337
     dataset_version: str = "games-2026-04-v1"
     load_progress_key: str = "load_progress:players"
+    vector_set_key: str = "vset:players"
+    vector_set_progress_key: str = "load_progress:vset"
 
     def validate(self) -> None:
         if self.total_players <= 0:

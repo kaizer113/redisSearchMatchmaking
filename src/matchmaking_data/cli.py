@@ -21,6 +21,13 @@ from matchmaking_data.redis_loader import (
     verify_redis_stack,
 )
 from matchmaking_data.threaded_loader import load_dataset_threaded
+from matchmaking_data.vector_set import (
+    load_vector_set_batch,
+    read_vector_set_checkpoint,
+    run_vset_benchmark,
+    vector_set_cardinality,
+    write_vector_set_checkpoint,
+)
 
 
 def _build_config(args: argparse.Namespace) -> PipelineConfig:
@@ -32,6 +39,7 @@ def _build_config(args: argparse.Namespace) -> PipelineConfig:
         batch_size=args.batch_size,
         random_seed=args.seed,
         embedding_model_name=args.model_name,
+        vector_set_key=args.vector_set_key,
     )
 
 
@@ -325,6 +333,102 @@ def cmd_rewrite_binary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_load_vset(args: argparse.Namespace) -> int:
+    config = _build_config(args)
+    config.validate()
+    client = get_redis_client(config.redis_url)
+
+    checkpoint = read_vector_set_checkpoint(client, config) if args.resume else None
+    if checkpoint:
+        if checkpoint.get("dataset_version") != config.dataset_version:
+            raise SystemExit("Checkpoint dataset_version does not match current dataset version")
+        if checkpoint.get("total_players") != str(config.total_players):
+            raise SystemExit("Checkpoint total_players does not match current load arguments")
+        if checkpoint.get("duplication_factor_max") != str(config.duplication_factor_max):
+            raise SystemExit("Checkpoint duplication_factor_max does not match current load arguments")
+        if checkpoint.get("random_seed") != str(config.random_seed):
+            raise SystemExit("Checkpoint random_seed does not match current load arguments")
+        effective_start_player_id = int(checkpoint["next_player_id"])
+    else:
+        effective_start_player_id = args.start_player_id
+
+    if effective_start_player_id >= config.total_players:
+        print(f"Vector set load already complete at player {effective_start_player_id}")
+        return 0
+
+    remaining_players = config.total_players - effective_start_player_id
+    start_profile_id = effective_start_player_id // config.duplication_factor_max
+    start_variant_offset = effective_start_player_id % config.duplication_factor_max
+    profile_count = int(
+        math.ceil((remaining_players + start_variant_offset) / float(config.duplication_factor_max))
+    )
+
+    embedded_canonicals = _embedded_canonical_stream(
+        start_profile_id=start_profile_id,
+        profile_count=profile_count,
+        batch_size=config.batch_size,
+        seed=config.random_seed,
+        dimensions=config.embedding_dimensions,
+        model_name=config.embedding_model_name,
+    )
+    expanded_players = iter_expanded_players(
+        canonical_profiles=embedded_canonicals,
+        start_player_id=effective_start_player_id,
+        total_players=remaining_players,
+        duplication_factor_max=config.duplication_factor_max,
+        start_variant_offset=start_variant_offset,
+    )
+
+    loaded = 0
+    write_vector_set_checkpoint(client, config, effective_start_player_id, "running")
+    for batch in chunked(expanded_players, config.batch_size):
+        loaded += load_vector_set_batch(client, config, batch, use_cas=not args.no_cas)
+        next_player_id = effective_start_player_id + loaded
+        write_vector_set_checkpoint(client, config, next_player_id, "running")
+        if loaded % max(config.batch_size, 1000) == 0 or next_player_id == config.total_players:
+            current_size = vector_set_cardinality(client, config.vector_set_key)
+            print(
+                f"Loaded {next_player_id}/{config.total_players} vector-set entries (vcard={current_size})",
+                file=sys.stderr,
+            )
+    write_vector_set_checkpoint(client, config, config.total_players, "completed")
+    print(f"Finished loading {config.total_players} vector-set entries")
+    return 0
+
+
+def cmd_benchmark_vset(args: argparse.Namespace) -> int:
+    config = _build_config(args)
+    client = get_redis_client(config.redis_url)
+    card = vector_set_cardinality(client, config.vector_set_key)
+    if card == 0:
+        raise SystemExit(f"Vector set {config.vector_set_key} is empty")
+    result = run_vset_benchmark(
+        config=config,
+        qps=args.qps,
+        duration_seconds=args.duration_seconds,
+        concurrency=args.concurrency,
+        max_player_id=args.max_player_id,
+        k=args.k,
+        query_pool_size=args.query_pool_size,
+        mode=args.mode,
+        ef_runtime=args.ef_runtime,
+        filter_ef=args.filter_ef,
+        seed=args.seed,
+    )
+    print(f"requested_qps={result.requested_qps}")
+    print(f"achieved_qps={result.achieved_qps:.2f}")
+    print(f"duration_seconds={result.duration_seconds:.2f}")
+    print(f"total_requests={result.total_requests}")
+    print(f"successful_requests={result.successful_requests}")
+    print(f"failed_requests={result.failed_requests}")
+    print(f"min_ms={result.min_ms:.2f}")
+    print(f"p50_ms={result.p50_ms:.2f}")
+    print(f"p95_ms={result.p95_ms:.2f}")
+    print(f"p99_ms={result.p99_ms:.2f}")
+    print(f"max_ms={result.max_ms:.2f}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Synthetic matchmaking dataset pipeline")
     parser.set_defaults(func=None)
@@ -336,6 +440,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--duplication-factor-max", type=int, default=10)
     common.add_argument("--batch-size", type=int, default=500)
     common.add_argument("--seed", type=int, default=1337)
+    common.add_argument("--vector-set-key", default=os.getenv("VECTOR_SET_KEY", "vset:players"))
     common.add_argument(
         "--model-name",
         default="nomic-ai/nomic-embed-text-v1.5",
@@ -368,6 +473,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Canonical profiles processed per threaded task.",
     )
     threaded_load_parser.set_defaults(func=cmd_load_threaded)
+
+    load_vset_parser = subparsers.add_parser("load-vset", parents=[common])
+    load_vset_parser.add_argument("--start-player-id", type=int, default=0)
+    load_vset_parser.add_argument("--resume", action="store_true")
+    load_vset_parser.add_argument("--no-cas", action="store_true")
+    load_vset_parser.set_defaults(func=cmd_load_vset)
 
     query_parser = subparsers.add_parser("query", parents=[common])
     query_parser.add_argument("--text", required=True)
@@ -403,6 +514,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override HNSW EF_RUNTIME at query time.",
     )
     benchmark_parser.set_defaults(func=cmd_benchmark)
+
+    benchmark_vset_parser = subparsers.add_parser("benchmark-vset", parents=[common])
+    benchmark_vset_parser.add_argument("--qps", type=int, default=1000)
+    benchmark_vset_parser.add_argument("--duration-seconds", type=int, default=30)
+    benchmark_vset_parser.add_argument("--concurrency", type=int, default=128)
+    benchmark_vset_parser.add_argument("--max-player-id", type=int, default=1_000_000)
+    benchmark_vset_parser.add_argument("--k", type=int, default=50)
+    benchmark_vset_parser.add_argument("--query-pool-size", type=int, default=20)
+    benchmark_vset_parser.add_argument("--ef-runtime", type=int, default=64)
+    benchmark_vset_parser.add_argument("--filter-ef", type=int, default=1000)
+    benchmark_vset_parser.add_argument("--mode", choices=["none", "binary"], default="none")
+    benchmark_vset_parser.set_defaults(func=cmd_benchmark_vset)
 
     rewrite_binary_parser = subparsers.add_parser("rewrite-binary", parents=[common])
     rewrite_binary_parser.add_argument("--start-player-id", type=int, default=0)
