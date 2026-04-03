@@ -17,6 +17,9 @@ class PipelineConfig:
     hnsw_m: int = 16
     hnsw_ef_construction: int = 200
     hnsw_ef_runtime: int = 64
+    vamana_graph_max_degree: int = 32
+    vamana_construction_window_size: int = 200
+    vamana_search_window_size: int = 64
     random_seed: int = 1337
     dataset_version: str = "games-2026-04-v1"
     load_progress_key: str = "load_progress:players"

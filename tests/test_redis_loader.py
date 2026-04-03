@@ -52,9 +52,19 @@ class RedisLoaderUnitTests(unittest.TestCase):
         self.assertIn("DISTANCE_METRIC L2", joined)
         self.assertIn("DIM 64", joined)
         self.assertIn("ON HASH", joined)
-        self.assertIn("binary TAG", joined)
         self.assertIn("binary TAG SORTABLE UNF", joined)
-        self.assertNotIn("$.player_id", joined)
+        self.assertNotIn("username", joined)
+
+    def test_create_index_uses_vamana_when_requested(self):
+        config = PipelineConfig(index_name="idx:players:vamana", vector_algorithm="SVS-VAMANA")
+        client = FakeRedis()
+        create_index(client, config)
+        joined = " ".join(str(part) for part in client.commands[-1])
+        self.assertIn("VECTOR SVS-VAMANA", joined)
+        self.assertIn("GRAPH_MAX_DEGREE 32", joined)
+        self.assertIn("CONSTRUCTION_WINDOW_SIZE 200", joined)
+        self.assertIn("SEARCH_WINDOW_SIZE 64", joined)
+        self.assertNotIn(" EF_RUNTIME ", joined)
 
     def test_load_batch_omits_player_id_from_json_payload(self):
         config = PipelineConfig()

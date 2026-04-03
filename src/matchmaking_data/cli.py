@@ -33,6 +33,7 @@ from matchmaking_data.vector_set import (
 def _build_config(args: argparse.Namespace) -> PipelineConfig:
     return PipelineConfig(
         redis_url=args.redis_url,
+        index_name=args.index_name,
         total_players=args.total_players,
         canonical_profile_count=args.canonical_profile_count,
         duplication_factor_max=args.duplication_factor_max,
@@ -40,6 +41,7 @@ def _build_config(args: argparse.Namespace) -> PipelineConfig:
         random_seed=args.seed,
         embedding_model_name=args.model_name,
         vector_set_key=args.vector_set_key,
+        vector_algorithm=args.vector_algorithm,
     )
 
 
@@ -293,6 +295,8 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         ef_runtime=args.ef_runtime,
         seed=args.seed,
     )
+    print("sample_command=")
+    print(result.sample_command)
     print(f"requested_qps={result.requested_qps}")
     print(f"achieved_qps={result.achieved_qps:.2f}")
     print(f"duration_seconds={result.duration_seconds:.2f}")
@@ -435,12 +439,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--redis-url", default=os.getenv("REDIS_URL", "redis://localhost:6379"))
+    common.add_argument("--index-name", default=os.getenv("INDEX_NAME", "idx:players"))
     common.add_argument("--total-players", type=int, default=10_000_000)
     common.add_argument("--canonical-profile-count", type=int, default=1_000_000)
     common.add_argument("--duplication-factor-max", type=int, default=10)
     common.add_argument("--batch-size", type=int, default=500)
     common.add_argument("--seed", type=int, default=1337)
     common.add_argument("--vector-set-key", default=os.getenv("VECTOR_SET_KEY", "vset:players"))
+    common.add_argument(
+        "--vector-algorithm",
+        choices=["HNSW", "SVS-VAMANA"],
+        default="HNSW",
+    )
     common.add_argument(
         "--model-name",
         default="nomic-ai/nomic-embed-text-v1.5",
@@ -511,7 +521,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--ef-runtime",
         type=int,
         default=None,
-        help="Override HNSW EF_RUNTIME at query time.",
+        help="Override HNSW EF_RUNTIME or SVS-VAMANA SEARCH_WINDOW_SIZE at query time.",
     )
     benchmark_parser.set_defaults(func=cmd_benchmark)
 

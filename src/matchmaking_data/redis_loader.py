@@ -34,7 +34,7 @@ def create_index(client, config: PipelineConfig) -> None:
     except Exception:
         pass
 
-    client.execute_command(
+    command = [
         "FT.CREATE",
         config.index_name,
         "ON",
@@ -43,28 +43,6 @@ def create_index(client, config: PipelineConfig) -> None:
         "1",
         config.key_prefix,
         "SCHEMA",
-        "username",
-        "TEXT",
-        "game",
-        "TAG",
-        "platform",
-        "TAG",
-        "region",
-        "TAG",
-        "country",
-        "TAG",
-        "rank_tier",
-        "TAG",
-        "rank_score",
-        "NUMERIC",
-        "play_style",
-        "TAG",
-        "role",
-        "TAG",
-        "availability",
-        "TAG",
-        "language",
-        "TAG",
         "binary",
         "TAG",
         "SORTABLE",
@@ -79,13 +57,30 @@ def create_index(client, config: PipelineConfig) -> None:
         str(config.embedding_dimensions),
         "DISTANCE_METRIC",
         config.distance_metric,
-        "M",
-        str(config.hnsw_m),
-        "EF_CONSTRUCTION",
-        str(config.hnsw_ef_construction),
-        "EF_RUNTIME",
-        str(config.hnsw_ef_runtime),
-    )
+    ]
+    if config.vector_algorithm.upper() == "SVS-VAMANA":
+        command.extend(
+            [
+                "GRAPH_MAX_DEGREE",
+                str(config.vamana_graph_max_degree),
+                "CONSTRUCTION_WINDOW_SIZE",
+                str(config.vamana_construction_window_size),
+                "SEARCH_WINDOW_SIZE",
+                str(config.vamana_search_window_size),
+            ]
+        )
+    else:
+        command.extend(
+            [
+                "M",
+                str(config.hnsw_m),
+                "EF_CONSTRUCTION",
+                str(config.hnsw_ef_construction),
+                "EF_RUNTIME",
+                str(config.hnsw_ef_runtime),
+            ]
+        )
+    client.execute_command(*command)
 
 
 def load_batch(client, config: PipelineConfig, players: List[Dict[str, object]]) -> int:

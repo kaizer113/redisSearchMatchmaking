@@ -24,6 +24,7 @@ class BenchmarkResult:
     p99_ms: float
     min_ms: float
     max_ms: float
+    sample_command: str
 
 
 def percentile(values: List[float], ratio: float) -> float:
@@ -65,6 +66,26 @@ def escape_aggregate_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
+def shell_escape_binary(value: bytes) -> str:
+    escaped = []
+    for byte in value:
+        if byte == 0x5C:
+            escaped.append(r"\\")
+        elif byte == 0x27:
+            escaped.append(r"\'")
+        elif byte == 0x0A:
+            escaped.append(r"\n")
+        elif byte == 0x0D:
+            escaped.append(r"\r")
+        elif byte == 0x09:
+            escaped.append(r"\t")
+        elif 32 <= byte <= 126:
+            escaped.append(chr(byte))
+        else:
+            escaped.append(f"\\x{byte:02x}")
+    return "$'" + "".join(escaped) + "'"
+
+
 def preload_query_vectors(
     config: PipelineConfig,
     max_player_id: int,
@@ -90,6 +111,50 @@ def preload_query_vectors(
     return vectors
 
 
+def _runtime_clause(config: PipelineConfig, runtime_value: Optional[int]) -> str:
+    if runtime_value is None:
+        return ""
+    if config.vector_algorithm.upper() == "SVS-VAMANA":
+        return f" SEARCH_WINDOW_SIZE {runtime_value}"
+    return f" EF_RUNTIME {runtime_value}"
+
+
+def build_sample_command(
+    config: PipelineConfig,
+    query_vector: bytes,
+    k: int,
+    mode: str,
+    binary_value: Optional[str],
+    aggregate_limit: int,
+    ef_runtime: Optional[int],
+) -> str:
+    runtime_clause = _runtime_clause(config, ef_runtime)
+    vector_arg = shell_escape_binary(query_vector)
+    if mode == "postfilter":
+        if binary_value is None:
+            raise RuntimeError("binary_value is required for postfilter benchmarks")
+        filter_expr = "@binary=='{}'".format(escape_aggregate_string(binary_value))
+        query = f"*=>[KNN {aggregate_limit} @embedding $vector{runtime_clause} AS score]"
+        return (
+            f"redis-cli FT.AGGREGATE {config.index_name} '{query}' "
+            f"PARAMS 2 vector {vector_arg} LOAD 3 __key @binary @score "
+            f"FILTER '{filter_expr}' SORTBY 2 @score ASC LIMIT 0 {k} DIALECT 2"
+        )
+    if mode == "binary":
+        if binary_value is None:
+            raise RuntimeError("binary_value is required for prefilter benchmarks")
+        query = (
+            f"@binary:{{{escape_tag_value(binary_value)}}}"
+            f"=>[KNN {k} @embedding $vector{runtime_clause} AS score]"
+        )
+    else:
+        query = f"*=>[KNN {k} @embedding $vector{runtime_clause} AS score]"
+    return (
+        f"redis-cli FT.SEARCH {config.index_name} '{query}' "
+        f"PARAMS 2 vector {vector_arg} SORTBY score ASC NOCONTENT DIALECT 2"
+    )
+
+
 def knn_query_from_bytes(
     client,
     config: PipelineConfig,
@@ -98,12 +163,12 @@ def knn_query_from_bytes(
     ef_runtime: Optional[int] = None,
     binary_value: Optional[str] = None,
 ) -> int:
-    ef_clause = f" EF_RUNTIME {ef_runtime}" if ef_runtime is not None else ""
-    query = f"*=>[KNN {k} @embedding $vector{ef_clause} AS score]"
+    runtime_clause = _runtime_clause(config, ef_runtime)
+    query = f"*=>[KNN {k} @embedding $vector{runtime_clause} AS score]"
     if binary_value is not None:
         query = (
             f"@binary:{{{escape_tag_value(binary_value)}}}"
-            f"=>[KNN {k} @embedding $vector{ef_clause} AS score]"
+            f"=>[KNN {k} @embedding $vector{runtime_clause} AS score]"
         )
     result = client.execute_command(
         "FT.SEARCH",
@@ -133,8 +198,8 @@ def aggregate_postfilter_query_from_bytes(
     binary_value: str,
 ) -> int:
     filter_expr = "@binary=='{}'".format(escape_aggregate_string(binary_value))
-    ef_clause = f" EF_RUNTIME {ef_runtime}" if ef_runtime is not None else ""
-    query = f"*=>[KNN {aggregate_limit} @embedding $vector{ef_clause} AS score]"
+    runtime_clause = _runtime_clause(config, ef_runtime)
+    query = f"*=>[KNN {aggregate_limit} @embedding $vector{runtime_clause} AS score]"
     result = client.execute_command(
         "FT.AGGREGATE",
         config.index_name,
@@ -239,6 +304,7 @@ def run_benchmark(
     total_requests = qps * duration_seconds
     submitted = 0
     in_flight = set()
+    sample_command = ""
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
         while submitted < total_requests or in_flight:
@@ -250,6 +316,16 @@ def run_benchmark(
                 query_vector, binary_value = query_vectors[randomizer.randrange(0, len(query_vectors))]
                 uses_binary = prefilter_field in {"binary", "postfilter"}
                 filtered_binary = binary_value if uses_binary else None
+                if not sample_command:
+                    sample_command = build_sample_command(
+                        config=config,
+                        query_vector=query_vector,
+                        k=k,
+                        mode=prefilter_field,
+                        binary_value=filtered_binary,
+                        aggregate_limit=aggregate_limit,
+                        ef_runtime=ef_runtime,
+                    )
                 min_results = 1 if prefilter_field == "postfilter" else (1 if filtered_binary is not None else k)
                 future = executor.submit(
                     run_single_query,
@@ -299,4 +375,5 @@ def run_benchmark(
         p99_ms=percentile(latencies_ms, 0.99),
         min_ms=min(latencies_ms) if latencies_ms else 0.0,
         max_ms=max(latencies_ms) if latencies_ms else 0.0,
+        sample_command=sample_command,
     )
