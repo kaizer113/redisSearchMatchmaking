@@ -1,6 +1,11 @@
 import unittest
 
-from matchmaking_data.benchmark import BenchmarkResult, escape_tag_value, percentile
+from matchmaking_data.benchmark import (
+    BenchmarkResult,
+    escape_aggregate_string,
+    escape_tag_value,
+    percentile,
+)
 
 
 class BenchmarkTests(unittest.TestCase):
@@ -32,6 +37,9 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_escape_tag_value(self):
         self.assertEqual(r"abc\+\/\=", escape_tag_value("abc+/="))
+
+    def test_escape_aggregate_string(self):
+        self.assertEqual(r"a\\b\'c", escape_aggregate_string("a\\b'c"))
 
 
 if __name__ == "__main__":

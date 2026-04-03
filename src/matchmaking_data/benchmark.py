@@ -61,6 +61,10 @@ def escape_tag_value(value: str) -> str:
     return "".join(escaped)
 
 
+def escape_aggregate_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def preload_query_vectors(
     config: PipelineConfig,
     max_player_id: int,
@@ -117,12 +121,52 @@ def knn_query_from_bytes(
     return int(result[0]) if result else 0
 
 
+def aggregate_postfilter_query_from_bytes(
+    client,
+    config: PipelineConfig,
+    query_vector: bytes,
+    k: int,
+    aggregate_limit: int,
+    binary_value: str,
+) -> int:
+    filter_expr = "@binary=='{}'".format(escape_aggregate_string(binary_value))
+    query = f"*=>[KNN {aggregate_limit} @embedding $vector AS score]"
+    result = client.execute_command(
+        "FT.AGGREGATE",
+        config.index_name,
+        query,
+        "PARAMS",
+        "2",
+        "vector",
+        query_vector,
+        "LOAD",
+        "3",
+        "__key",
+        "@binary",
+        "@score",
+        "FILTER",
+        filter_expr,
+        "SORTBY",
+        "2",
+        "@score",
+        "ASC",
+        "LIMIT",
+        "0",
+        str(k),
+        "DIALECT",
+        "2",
+    )
+    return int(result[0]) if result else 0
+
+
 def run_single_query(
     redis_url: str,
     config: PipelineConfig,
     query_vector: bytes,
     expected_k: int,
+    mode: str = "none",
     binary_value: Optional[str] = None,
+    aggregate_limit: int = 10_000,
     min_results: int = 1,
 ) -> float:
     client = getattr(_THREAD_LOCAL, "client", None)
@@ -134,13 +178,26 @@ def run_single_query(
         )
         _THREAD_LOCAL.client = client
     started = time.perf_counter()
-    count = knn_query_from_bytes(
-        client,
-        config,
-        query_vector,
-        k=expected_k,
-        binary_value=binary_value,
-    )
+    if mode == "postfilter":
+        if binary_value is None:
+            raise RuntimeError("binary_value is required for postfilter benchmarks")
+        count = aggregate_postfilter_query_from_bytes(
+            client,
+            config,
+            query_vector,
+            k=expected_k,
+            aggregate_limit=aggregate_limit,
+            binary_value=binary_value,
+        )
+    else:
+        prefilter_binary = binary_value if mode == "binary" else None
+        count = knn_query_from_bytes(
+            client,
+            config,
+            query_vector,
+            k=expected_k,
+            binary_value=prefilter_binary,
+        )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     if count < min_results:
         raise RuntimeError(f"Expected at least {min_results} matches, received {count}")
@@ -156,6 +213,7 @@ def run_benchmark(
     k: int = 50,
     query_pool_size: int = 20,
     prefilter_field: str = "none",
+    aggregate_limit: int = 10_000,
     seed: int = 1337,
 ) -> BenchmarkResult:
     randomizer = random.Random(seed)
@@ -182,15 +240,18 @@ def run_benchmark(
                 if now < target_time:
                     break
                 query_vector, binary_value = query_vectors[randomizer.randrange(0, len(query_vectors))]
-                filtered_binary = binary_value if prefilter_field == "binary" else None
-                min_results = 1 if filtered_binary is not None else k
+                uses_binary = prefilter_field in {"binary", "postfilter"}
+                filtered_binary = binary_value if uses_binary else None
+                min_results = 1 if prefilter_field == "postfilter" else (1 if filtered_binary is not None else k)
                 future = executor.submit(
                     run_single_query,
                     config.redis_url,
                     config,
                     query_vector,
                     k,
+                    prefilter_field,
                     filtered_binary,
+                    aggregate_limit,
                     min_results,
                 )
                 in_flight.add(future)

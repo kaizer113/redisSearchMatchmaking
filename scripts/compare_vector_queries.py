@@ -243,7 +243,6 @@ def main() -> int:
             print()
             printed_examples = True
 
-        print(f"sample {sample_index:>2}  player_id={player_id}  binary={binary_text}")
         reference_unfiltered_ids = None
         reference_filtered_pre_ids = None
         reference_filtered_post_ids = None
@@ -271,7 +270,6 @@ def main() -> int:
             else:
                 _, recall = overlap(reference_unfiltered_ids, ids)
             aggregate["unfiltered"][ef_runtime]["recalls"].append(recall)
-            print(f"  {'unfiltered':<12} ef={ef_runtime:<3} matches={matches:>3} time_ms={elapsed_ms:>8.2f} recall_vs_128={recall:>7.2%}")
 
             matches, elapsed_ms, ids = run_search_query(
                 client, args.index_name, filtered_pre_query, vector, limit
@@ -283,7 +281,6 @@ def main() -> int:
             else:
                 _, recall = overlap(reference_filtered_pre_ids, ids)
             aggregate["filtered_pre"][ef_runtime]["recalls"].append(recall)
-            print(f"  {'prefilter':<12} ef={ef_runtime:<3} matches={matches:>3} time_ms={elapsed_ms:>8.2f} recall_vs_128={recall:>7.2%}")
 
             matches, elapsed_ms, ids, filter_expr, rows = run_aggregate_query(
                 client,
@@ -300,11 +297,6 @@ def main() -> int:
             else:
                 _, recall = overlap(reference_filtered_post_ids, ids)
             aggregate["filtered_post"][ef_runtime]["recalls"].append(recall)
-            print(f"  {'postfilter':<12} ef={ef_runtime:<3} matches={matches:>3} time_ms={elapsed_ms:>8.2f} recall_vs_128={recall:>7.2%}")
-            if rows:
-                preview = rows[: min(3, len(rows))]
-                print(f"    preview {preview}")
-        print()
 
     print_summary(aggregate, ef_values)
     return 0
