@@ -282,6 +282,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         query_pool_size=args.query_pool_size,
         prefilter_field=args.prefilter_field,
         aggregate_limit=args.aggregate_limit,
+        ef_runtime=args.ef_runtime,
         seed=args.seed,
     )
     print(f"requested_qps={result.requested_qps}")
@@ -394,6 +395,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=10_000,
         help="KNN candidate pool for postfilter aggregate benchmarks.",
+    )
+    benchmark_parser.add_argument(
+        "--ef-runtime",
+        type=int,
+        default=None,
+        help="Override HNSW EF_RUNTIME at query time.",
     )
     benchmark_parser.set_defaults(func=cmd_benchmark)
 

@@ -95,13 +95,15 @@ def knn_query_from_bytes(
     config: PipelineConfig,
     query_vector: bytes,
     k: int = 50,
+    ef_runtime: Optional[int] = None,
     binary_value: Optional[str] = None,
 ) -> int:
-    query = f"*=>[KNN {k} @embedding $vector AS score]"
+    ef_clause = f" EF_RUNTIME {ef_runtime}" if ef_runtime is not None else ""
+    query = f"*=>[KNN {k} @embedding $vector{ef_clause} AS score]"
     if binary_value is not None:
         query = (
             f"@binary:{{{escape_tag_value(binary_value)}}}"
-            f"=>[KNN {k} @embedding $vector AS score]"
+            f"=>[KNN {k} @embedding $vector{ef_clause} AS score]"
         )
     result = client.execute_command(
         "FT.SEARCH",
@@ -127,10 +129,12 @@ def aggregate_postfilter_query_from_bytes(
     query_vector: bytes,
     k: int,
     aggregate_limit: int,
+    ef_runtime: Optional[int],
     binary_value: str,
 ) -> int:
     filter_expr = "@binary=='{}'".format(escape_aggregate_string(binary_value))
-    query = f"*=>[KNN {aggregate_limit} @embedding $vector AS score]"
+    ef_clause = f" EF_RUNTIME {ef_runtime}" if ef_runtime is not None else ""
+    query = f"*=>[KNN {aggregate_limit} @embedding $vector{ef_clause} AS score]"
     result = client.execute_command(
         "FT.AGGREGATE",
         config.index_name,
@@ -167,6 +171,7 @@ def run_single_query(
     mode: str = "none",
     binary_value: Optional[str] = None,
     aggregate_limit: int = 10_000,
+    ef_runtime: Optional[int] = None,
     min_results: int = 1,
 ) -> float:
     client = getattr(_THREAD_LOCAL, "client", None)
@@ -187,6 +192,7 @@ def run_single_query(
             query_vector,
             k=expected_k,
             aggregate_limit=aggregate_limit,
+            ef_runtime=ef_runtime,
             binary_value=binary_value,
         )
     else:
@@ -196,6 +202,7 @@ def run_single_query(
             config,
             query_vector,
             k=expected_k,
+            ef_runtime=ef_runtime,
             binary_value=prefilter_binary,
         )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -214,6 +221,7 @@ def run_benchmark(
     query_pool_size: int = 20,
     prefilter_field: str = "none",
     aggregate_limit: int = 10_000,
+    ef_runtime: Optional[int] = None,
     seed: int = 1337,
 ) -> BenchmarkResult:
     randomizer = random.Random(seed)
@@ -252,6 +260,7 @@ def run_benchmark(
                     prefilter_field,
                     filtered_binary,
                     aggregate_limit,
+                    ef_runtime,
                     min_results,
                 )
                 in_flight.add(future)
