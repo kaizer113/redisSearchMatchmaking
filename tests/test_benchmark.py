@@ -67,6 +67,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("FT.SEARCH idx:players", command)
         self.assertIn(r"@binary:{abc\+\/\=}", command)
         self.assertIn("EF_RUNTIME 64", command)
+        self.assertIn("LIMIT 0 50", command)
 
     def test_build_sample_command_for_vamana_postfilter(self):
         config = PipelineConfig(index_name="idx:players:vamana", vector_algorithm="SVS-VAMANA")

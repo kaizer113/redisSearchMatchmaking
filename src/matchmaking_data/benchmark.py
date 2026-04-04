@@ -151,7 +151,7 @@ def build_sample_command(
         query = f"*=>[KNN {k} @embedding $vector{runtime_clause} AS score]"
     return (
         f"redis-cli FT.SEARCH {config.index_name} '{query}' "
-        f"PARAMS 2 vector {vector_arg} SORTBY score ASC NOCONTENT DIALECT 2"
+        f"PARAMS 2 vector {vector_arg} SORTBY score ASC NOCONTENT LIMIT 0 {k} DIALECT 2"
     )
 
 
@@ -182,6 +182,9 @@ def knn_query_from_bytes(
         "score",
         "ASC",
         "NOCONTENT",
+        "LIMIT",
+        "0",
+        str(k),
         "DIALECT",
         "2",
     )
