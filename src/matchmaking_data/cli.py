@@ -293,16 +293,28 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         prefilter_field=args.prefilter_field,
         aggregate_limit=args.aggregate_limit,
         ef_runtime=args.ef_runtime,
+        write_qps=args.write_qps,
+        write_pool_size=args.write_pool_size,
         seed=args.seed,
     )
     print("sample_command=")
     print(result.sample_command)
+    if result.requested_write_qps > 0:
+        print("sample_write_command=")
+        print(result.sample_write_command)
     print(f"requested_qps={result.requested_qps}")
     print(f"achieved_qps={result.achieved_qps:.2f}")
+    if result.requested_write_qps > 0:
+        print(f"requested_write_qps={result.requested_write_qps}")
+        print(f"achieved_write_qps={result.achieved_write_qps:.2f}")
     print(f"duration_seconds={result.duration_seconds:.2f}")
     print(f"total_requests={result.total_requests}")
     print(f"successful_requests={result.successful_requests}")
     print(f"failed_requests={result.failed_requests}")
+    if result.requested_write_qps > 0:
+        print(f"total_writes={result.total_writes}")
+        print(f"successful_writes={result.successful_writes}")
+        print(f"failed_writes={result.failed_writes}")
     print(f"min_ms={result.min_ms:.2f}")
     print(f"p50_ms={result.p50_ms:.2f}")
     print(f"p95_ms={result.p95_ms:.2f}")
@@ -522,6 +534,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Override HNSW EF_RUNTIME or SVS-VAMANA SEARCH_WINDOW_SIZE at query time.",
+    )
+    benchmark_parser.add_argument(
+        "--write-qps",
+        type=int,
+        default=0,
+        help="Background overwrite rate during the benchmark.",
+    )
+    benchmark_parser.add_argument(
+        "--write-pool-size",
+        type=int,
+        default=30,
+        help="Number of existing keys to preload and rewrite repeatedly during the benchmark.",
     )
     benchmark_parser.set_defaults(func=cmd_benchmark)
 

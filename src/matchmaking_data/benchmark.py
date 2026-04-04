@@ -3,7 +3,7 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from matchmaking_data.config import PipelineConfig
 from matchmaking_data.redis_loader import get_redis_client, player_key
@@ -25,6 +25,12 @@ class BenchmarkResult:
     min_ms: float
     max_ms: float
     sample_command: str
+    requested_write_qps: int
+    achieved_write_qps: float
+    total_writes: int
+    successful_writes: int
+    failed_writes: int
+    sample_write_command: str
 
 
 def percentile(values: List[float], ratio: float) -> float:
@@ -111,6 +117,33 @@ def preload_query_vectors(
     return vectors
 
 
+def preload_write_payloads(
+    config: PipelineConfig,
+    max_player_id: int,
+    write_pool_size: int,
+    seed: int,
+) -> List[Tuple[str, Dict[bytes, bytes]]]:
+    randomizer = random.Random(seed + 17)
+    client = get_redis_client(
+        config.redis_url,
+        health_check_interval=0,
+        socket_keepalive=True,
+    )
+    payloads: List[Tuple[str, Dict[bytes, bytes]]] = []
+    seen = set()
+    while len(payloads) < write_pool_size:
+        player_id = randomizer.randrange(0, max_player_id)
+        if player_id in seen:
+            continue
+        seen.add(player_id)
+        key = player_key(config.key_prefix, player_id)
+        mapping = client.hgetall(key)
+        if not mapping:
+            continue
+        payloads.append((key, mapping))
+    return payloads
+
+
 def _runtime_clause(config: PipelineConfig, runtime_value: Optional[int]) -> str:
     if runtime_value is None:
         return ""
@@ -153,6 +186,16 @@ def build_sample_command(
         f"redis-cli FT.SEARCH {config.index_name} '{query}' "
         f"PARAMS 2 vector {vector_arg} SORTBY score ASC NOCONTENT LIMIT 0 {k} DIALECT 2"
     )
+
+
+def build_sample_write_command(key: str, mapping: Dict[bytes, bytes]) -> str:
+    parts = [f"redis-cli HSET {key}"]
+    for field, value in mapping.items():
+        field_text = field.decode("utf-8") if isinstance(field, bytes) else str(field)
+        value_bytes = value if isinstance(value, bytes) else str(value).encode("utf-8")
+        parts.append(field_text)
+        parts.append(shell_escape_binary(value_bytes))
+    return " ".join(parts)
 
 
 def knn_query_from_bytes(
@@ -279,6 +322,24 @@ def run_single_query(
     return elapsed_ms
 
 
+def run_single_write(
+    redis_url: str,
+    key: str,
+    mapping: Dict[bytes, bytes],
+) -> None:
+    client = getattr(_THREAD_LOCAL, "write_client", None)
+    client_url = getattr(_THREAD_LOCAL, "write_redis_url", None)
+    if client is None or client_url != redis_url:
+        client = get_redis_client(
+            redis_url,
+            health_check_interval=0,
+            socket_keepalive=True,
+        )
+        _THREAD_LOCAL.write_client = client
+        _THREAD_LOCAL.write_redis_url = redis_url
+    client.hset(key, mapping=mapping)
+
+
 def run_benchmark(
     config: PipelineConfig,
     qps: int,
@@ -290,6 +351,8 @@ def run_benchmark(
     prefilter_field: str = "none",
     aggregate_limit: int = 10_000,
     ef_runtime: Optional[int] = None,
+    write_qps: int = 0,
+    write_pool_size: int = 30,
     seed: int = 1337,
 ) -> BenchmarkResult:
     randomizer = random.Random(seed)
@@ -301,16 +364,31 @@ def run_benchmark(
     )
     latencies_ms: List[float] = []
     failed_requests = 0
+    failed_writes = 0
     lock = threading.Lock()
     started_at = time.perf_counter()
-    stop_at = started_at + duration_seconds
     total_requests = qps * duration_seconds
+    total_writes = write_qps * duration_seconds
     submitted = 0
+    submitted_writes = 0
     in_flight = set()
     sample_command = ""
+    sample_write_command = ""
+    write_payloads = (
+        preload_write_payloads(
+            config=config,
+            max_player_id=max_player_id,
+            write_pool_size=write_pool_size,
+            seed=seed,
+        )
+        if write_qps > 0
+        else []
+    )
+    if write_qps > 0 and not write_payloads:
+        raise RuntimeError("Unable to preload write payloads from the existing dataset")
 
     with ThreadPoolExecutor(max_workers=concurrency) as executor:
-        while submitted < total_requests or in_flight:
+        while submitted < total_requests or submitted_writes < total_writes or in_flight:
             now = time.perf_counter()
             while submitted < total_requests and len(in_flight) < concurrency:
                 target_time = started_at + (submitted / float(qps))
@@ -346,8 +424,39 @@ def run_benchmark(
                 submitted += 1
                 now = time.perf_counter()
 
+            while (
+                write_qps > 0
+                and submitted_writes < total_writes
+                and len(in_flight) < concurrency
+            ):
+                target_time = started_at + (submitted_writes / float(write_qps))
+                if now < target_time:
+                    break
+                key, mapping = write_payloads[randomizer.randrange(0, len(write_payloads))]
+                if not sample_write_command:
+                    sample_write_command = build_sample_write_command(key, mapping)
+                future = executor.submit(
+                    run_single_write,
+                    config.redis_url,
+                    key,
+                    mapping,
+                )
+                future._benchmark_kind = "write"
+                in_flight.add(future)
+                submitted_writes += 1
+                now = time.perf_counter()
+
             if not in_flight:
-                sleep_for = max(0.0, (started_at + (submitted / float(qps))) - now)
+                next_read_time = (
+                    started_at + (submitted / float(qps)) if submitted < total_requests else None
+                )
+                next_write_time = (
+                    started_at + (submitted_writes / float(write_qps))
+                    if write_qps > 0 and submitted_writes < total_writes
+                    else None
+                )
+                target_candidates = [value for value in [next_read_time, next_write_time] if value is not None]
+                sleep_for = max(0.0, min(target_candidates) - now) if target_candidates else 0.0
                 if sleep_for > 0:
                     time.sleep(min(sleep_for, 0.01))
                 continue
@@ -356,16 +465,26 @@ def run_benchmark(
             in_flight = set(pending)
             for future in done:
                 try:
-                    latency = future.result()
+                    kind = getattr(future, "_benchmark_kind", "read")
+                    result = future.result()
                     with lock:
-                        latencies_ms.append(latency)
+                        if kind == "write":
+                            pass
+                        else:
+                            latencies_ms.append(result)
                 except Exception:
                     with lock:
-                        failed_requests += 1
+                        kind = getattr(future, "_benchmark_kind", "read")
+                        if kind == "write":
+                            failed_writes += 1
+                        else:
+                            failed_requests += 1
 
     actual_duration = max(time.perf_counter() - started_at, 0.001)
     success_count = len(latencies_ms)
+    successful_writes = total_writes - failed_writes
     achieved_qps = success_count / actual_duration if actual_duration else 0.0
+    achieved_write_qps = successful_writes / actual_duration if actual_duration else 0.0
     return BenchmarkResult(
         requested_qps=qps,
         achieved_qps=achieved_qps,
@@ -379,4 +498,10 @@ def run_benchmark(
         min_ms=min(latencies_ms) if latencies_ms else 0.0,
         max_ms=max(latencies_ms) if latencies_ms else 0.0,
         sample_command=sample_command,
+        requested_write_qps=write_qps,
+        achieved_write_qps=achieved_write_qps,
+        total_writes=total_writes,
+        successful_writes=successful_writes,
+        failed_writes=failed_writes,
+        sample_write_command=sample_write_command,
     )

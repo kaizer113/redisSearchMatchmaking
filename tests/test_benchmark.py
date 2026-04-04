@@ -4,6 +4,7 @@ from matchmaking_data.benchmark import (
     BenchmarkResult,
     _runtime_clause,
     build_sample_command,
+    build_sample_write_command,
     escape_aggregate_string,
     escape_tag_value,
     percentile,
@@ -34,10 +35,17 @@ class BenchmarkTests(unittest.TestCase):
             min_ms=2.1,
             max_ms=44.9,
             sample_command="redis-cli FT.SEARCH idx:players ...",
+            requested_write_qps=30,
+            achieved_write_qps=29.1,
+            total_writes=900,
+            successful_writes=900,
+            failed_writes=0,
+            sample_write_command="redis-cli HSET player:1 ...",
         )
         self.assertEqual(1000, result.requested_qps)
         self.assertEqual(29900, result.successful_requests)
         self.assertEqual(21.7, result.p99_ms)
+        self.assertEqual(900, result.total_writes)
 
     def test_escape_tag_value(self):
         self.assertEqual(r"abc\+\/\=", escape_tag_value("abc+/="))
@@ -83,6 +91,15 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("FT.AGGREGATE idx:players:vamana", command)
         self.assertIn("SEARCH_WINDOW_SIZE 64", command)
         self.assertIn("FILTER '@binary=='", command)
+
+    def test_build_sample_write_command(self):
+        command = build_sample_write_command(
+            "player:42",
+            {b"binary": b"abc", b"embedding": b"\x01\x02"},
+        )
+        self.assertIn("redis-cli HSET player:42", command)
+        self.assertIn("binary", command)
+        self.assertIn("embedding", command)
 
 
 if __name__ == "__main__":
