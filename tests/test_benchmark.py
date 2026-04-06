@@ -101,6 +101,20 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("binary", command)
         self.assertIn("embedding", command)
 
+    def test_filtered_index_mode_uses_plain_search_shape(self):
+        config = PipelineConfig(index_name="idx:players:binary")
+        command = build_sample_command(
+            config=config,
+            query_vector=b"\x01\x02",
+            k=50,
+            mode="none",
+            binary_value=None,
+            aggregate_limit=10000,
+            ef_runtime=64,
+        )
+        self.assertIn("FT.SEARCH idx:players:binary", command)
+        self.assertNotIn("@binary:{", command)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -295,6 +295,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         ef_runtime=args.ef_runtime,
         write_qps=args.write_qps,
         write_pool_size=args.write_pool_size,
+        query_binary_value=args.query_binary_value,
         seed=args.seed,
     )
     print("sample_command=")
@@ -546,6 +547,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=30,
         help="Number of existing keys to preload and rewrite repeatedly during the benchmark.",
+    )
+    benchmark_parser.add_argument(
+        "--query-binary-value",
+        default=None,
+        help="Restrict query-vector preload and background write pool to a specific binary bucket value.",
     )
     benchmark_parser.set_defaults(func=cmd_benchmark)
 

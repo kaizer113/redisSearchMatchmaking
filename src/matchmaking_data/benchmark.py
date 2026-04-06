@@ -97,6 +97,7 @@ def preload_query_vectors(
     max_player_id: int,
     query_pool_size: int,
     seed: int,
+    required_binary_value: Optional[str] = None,
 ) -> List[Tuple[bytes, str]]:
     randomizer = random.Random(seed)
     client = get_redis_client(
@@ -113,6 +114,8 @@ def preload_query_vectors(
         seen.add(player_id)
         vector = fetch_player_embedding(client, config, player_id)
         binary = fetch_player_binary(client, config, player_id)
+        if required_binary_value is not None and binary != required_binary_value:
+            continue
         vectors.append((vector, binary))
     return vectors
 
@@ -122,6 +125,7 @@ def preload_write_payloads(
     max_player_id: int,
     write_pool_size: int,
     seed: int,
+    required_binary_value: Optional[str] = None,
 ) -> List[Tuple[str, Dict[bytes, bytes]]]:
     randomizer = random.Random(seed + 17)
     client = get_redis_client(
@@ -140,6 +144,13 @@ def preload_write_payloads(
         mapping = client.hgetall(key)
         if not mapping:
             continue
+        if required_binary_value is not None:
+            raw_binary = mapping.get(b"binary") or mapping.get("binary")
+            if raw_binary is None:
+                continue
+            binary_text = raw_binary.decode("utf-8") if isinstance(raw_binary, bytes) else str(raw_binary)
+            if binary_text != required_binary_value:
+                continue
         payloads.append((key, mapping))
     return payloads
 
@@ -353,6 +364,7 @@ def run_benchmark(
     ef_runtime: Optional[int] = None,
     write_qps: int = 0,
     write_pool_size: int = 30,
+    query_binary_value: Optional[str] = None,
     seed: int = 1337,
 ) -> BenchmarkResult:
     randomizer = random.Random(seed)
@@ -361,6 +373,7 @@ def run_benchmark(
         max_player_id=max_player_id,
         query_pool_size=query_pool_size,
         seed=seed,
+        required_binary_value=query_binary_value,
     )
     latencies_ms: List[float] = []
     failed_requests = 0
@@ -380,6 +393,7 @@ def run_benchmark(
             max_player_id=max_player_id,
             write_pool_size=write_pool_size,
             seed=seed,
+            required_binary_value=query_binary_value,
         )
         if write_qps > 0
         else []
