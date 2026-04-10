@@ -288,6 +288,7 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         filter_field=args.filter_field,
         filter_value=(str(args.filter_value) if args.filter_value is not None else None),
         ef_runtime=args.ef_runtime,
+        write_qps=args.write_qps,
         write_pool_size=args.write_pool_size,
         seed=args.seed,
     )
@@ -500,6 +501,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Override HNSW EF_RUNTIME or SVS-VAMANA SEARCH_WINDOW_SIZE at query time.",
+    )
+    benchmark_parser.add_argument(
+        "--write-qps",
+        type=int,
+        default=30,
+        help="Background write batch rate. Use 0 for reads-only benchmarks.",
     )
     benchmark_parser.add_argument(
         "--write-pool-size",

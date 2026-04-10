@@ -99,6 +99,7 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("player_id", command)
         self.assertIn("embedding", command)
         self.assertEqual(WRITE_BATCH_SIZE, 100)
+        self.assertEqual(WRITE_BATCHES_PER_SECOND, 30)
 
 
 if __name__ == "__main__":

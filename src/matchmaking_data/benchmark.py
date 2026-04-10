@@ -310,6 +310,7 @@ def run_benchmark(
     filter_field: str = "none",
     filter_value: Optional[str] = None,
     ef_runtime: Optional[int] = None,
+    write_qps: int = WRITE_BATCHES_PER_SECOND,
     write_pool_size: int = 30,
     seed: int = 1337,
 ) -> BenchmarkResult:
@@ -322,12 +323,16 @@ def run_benchmark(
         filter_field=filter_field,
         filter_value=filter_value,
     )
-    write_batches = preload_write_batches(
-        config=config,
-        max_player_id=max_player_id,
-        write_pool_size=write_pool_size,
-        seed=seed,
-        batch_size=WRITE_BATCH_SIZE,
+    write_batches = (
+        preload_write_batches(
+            config=config,
+            max_player_id=max_player_id,
+            write_pool_size=write_pool_size,
+            seed=seed,
+            batch_size=WRITE_BATCH_SIZE,
+        )
+        if write_qps > 0
+        else []
     )
     latencies_ms: List[float] = []
     failed_requests = 0
@@ -335,7 +340,7 @@ def run_benchmark(
     lock = threading.Lock()
     started_at = time.perf_counter()
     total_requests = qps * duration_seconds
-    total_writes = WRITE_BATCHES_PER_SECOND * duration_seconds
+    total_writes = write_qps * duration_seconds
     submitted = 0
     submitted_writes = 0
     in_flight = set()
@@ -378,8 +383,8 @@ def run_benchmark(
                 submitted += 1
                 now = time.perf_counter()
 
-            while submitted_writes < total_writes and len(in_flight) < concurrency:
-                target_time = started_at + (submitted_writes / float(WRITE_BATCHES_PER_SECOND))
+            while write_qps > 0 and submitted_writes < total_writes and len(in_flight) < concurrency:
+                target_time = started_at + (submitted_writes / float(write_qps))
                 if now < target_time:
                     break
                 batch = write_batches[randomizer.randrange(0, len(write_batches))]
@@ -394,8 +399,8 @@ def run_benchmark(
             if not in_flight:
                 next_read_time = started_at + (submitted / float(qps)) if submitted < total_requests else None
                 next_write_time = (
-                    started_at + (submitted_writes / float(WRITE_BATCHES_PER_SECOND))
-                    if submitted_writes < total_writes
+                    started_at + (submitted_writes / float(write_qps))
+                    if write_qps > 0 and submitted_writes < total_writes
                     else None
                 )
                 target_candidates = [value for value in [next_read_time, next_write_time] if value is not None]
@@ -438,7 +443,7 @@ def run_benchmark(
         min_ms=min(latencies_ms) if latencies_ms else 0.0,
         max_ms=max(latencies_ms) if latencies_ms else 0.0,
         sample_command=sample_command,
-        requested_write_qps=WRITE_BATCHES_PER_SECOND,
+        requested_write_qps=write_qps,
         achieved_write_qps=achieved_write_qps,
         total_writes=total_writes,
         successful_writes=successful_writes,
