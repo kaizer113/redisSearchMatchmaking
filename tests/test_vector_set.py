@@ -9,9 +9,9 @@ class VectorSetTests(unittest.TestCase):
         self.assertEqual("player:42", vset_element(42))
 
     def test_vector_set_progress_key_uses_dataset_version(self):
-        config = PipelineConfig(dataset_version="games-2026-04-v1", vector_set_key="vset:players:exp1")
+        config = PipelineConfig(dataset_version="players-2026-04-v2", vector_set_key="vset:players:exp1")
         self.assertEqual(
-            "load_progress:vset:vset|players|exp1:games-2026-04-v1",
+            "load_progress:vset:vset|players|exp1:players-2026-04-v2",
             vector_set_progress_key(config),
         )
 

@@ -2,10 +2,11 @@ import unittest
 
 from matchmaking_data.benchmark import (
     BenchmarkResult,
+    WRITE_BATCH_SIZE,
+    WRITE_BATCHES_PER_SECOND,
     _runtime_clause,
     build_sample_command,
     build_sample_write_command,
-    escape_aggregate_string,
     escape_tag_value,
     percentile,
 )
@@ -35,7 +36,7 @@ class BenchmarkTests(unittest.TestCase):
             min_ms=2.1,
             max_ms=44.9,
             sample_command="redis-cli FT.SEARCH idx:players ...",
-            requested_write_qps=30,
+            requested_write_qps=WRITE_BATCHES_PER_SECOND,
             achieved_write_qps=29.1,
             total_writes=900,
             successful_writes=900,
@@ -49,9 +50,6 @@ class BenchmarkTests(unittest.TestCase):
 
     def test_escape_tag_value(self):
         self.assertEqual(r"abc\+\/\=", escape_tag_value("abc+/="))
-
-    def test_escape_aggregate_string(self):
-        self.assertEqual(r"a\\b\'c", escape_aggregate_string("a\\b'c"))
 
     def test_runtime_clause_for_hnsw(self):
         config = PipelineConfig(vector_algorithm="HNSW")
@@ -67,53 +65,40 @@ class BenchmarkTests(unittest.TestCase):
             config=config,
             query_vector=b"\x01\x02",
             k=50,
-            mode="binary",
-            binary_value="abc+/=",
-            aggregate_limit=10000,
+            filter_field="field1",
+            filter_value="1",
             ef_runtime=64,
         )
         self.assertIn("FT.SEARCH idx:players", command)
-        self.assertIn(r"@binary:{abc\+\/\=}", command)
+        self.assertIn("@field1:{1}", command)
         self.assertIn("EF_RUNTIME 64", command)
         self.assertIn("LIMIT 0 50", command)
 
-    def test_build_sample_command_for_vamana_postfilter(self):
-        config = PipelineConfig(index_name="idx:players:vamana", vector_algorithm="SVS-VAMANA")
+    def test_build_sample_command_without_filter(self):
+        config = PipelineConfig(index_name="idx:players:v2")
         command = build_sample_command(
             config=config,
             query_vector=b"\x01\x02",
             k=50,
-            mode="postfilter",
-            binary_value="abc",
-            aggregate_limit=10000,
+            filter_field="none",
+            filter_value=None,
             ef_runtime=64,
         )
-        self.assertIn("FT.AGGREGATE idx:players:vamana", command)
-        self.assertIn("SEARCH_WINDOW_SIZE 64", command)
-        self.assertIn("FILTER '@binary=='", command)
+        self.assertIn("FT.SEARCH idx:players:v2", command)
+        self.assertNotIn("@field1:{", command)
+        self.assertNotIn("@field2:{", command)
 
     def test_build_sample_write_command(self):
         command = build_sample_write_command(
-            "player:42",
-            {b"binary": b"abc", b"embedding": b"\x01\x02"},
+            [
+                ("player:42", {b"player_id": b"42", b"field1": b"1", b"embedding": b"\x01\x02"}),
+                ("player:43", {b"player_id": b"43", b"field2": b"0", b"embedding": b"\x03\x04"}),
+            ]
         )
         self.assertIn("redis-cli HSET player:42", command)
-        self.assertIn("binary", command)
+        self.assertIn("player_id", command)
         self.assertIn("embedding", command)
-
-    def test_filtered_index_mode_uses_plain_search_shape(self):
-        config = PipelineConfig(index_name="idx:players:binary")
-        command = build_sample_command(
-            config=config,
-            query_vector=b"\x01\x02",
-            k=50,
-            mode="none",
-            binary_value=None,
-            aggregate_limit=10000,
-            ef_runtime=64,
-        )
-        self.assertIn("FT.SEARCH idx:players:binary", command)
-        self.assertNotIn("@binary:{", command)
+        self.assertEqual(WRITE_BATCH_SIZE, 100)
 
 
 if __name__ == "__main__":

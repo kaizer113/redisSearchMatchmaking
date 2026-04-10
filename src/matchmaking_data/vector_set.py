@@ -9,7 +9,6 @@ import numpy as np
 
 from matchmaking_data.benchmark import BenchmarkResult, percentile
 from matchmaking_data.config import PipelineConfig
-from matchmaking_data.generator import binary_value_for_profile
 from matchmaking_data.redis_loader import get_redis_client
 
 _THREAD_LOCAL = threading.local()
@@ -76,7 +75,10 @@ def load_vector_set_batch(
         )
         if use_cas:
             command.append("CAS")
-        attrs = json.dumps({"binary": player["binary"]}, separators=(",", ":"))
+        attrs = json.dumps(
+            {"field1": str(player["field1"]), "field2": str(player["field2"])},
+            separators=(",", ":"),
+        )
         command.extend(["SETATTR", attrs])
         pipeline.execute_command(*command)
     pipeline.execute()
@@ -97,7 +99,8 @@ def vsim_query(
     element: str,
     k: int,
     ef_runtime: Optional[int] = None,
-    binary_value: Optional[str] = None,
+    filter_field: Optional[str] = None,
+    filter_value: Optional[str] = None,
     filter_ef: Optional[int] = None,
 ) -> int:
     command = [
@@ -110,8 +113,8 @@ def vsim_query(
     ]
     if ef_runtime is not None:
         command.extend(["EF", str(ef_runtime)])
-    if binary_value is not None:
-        command.extend(["FILTER", f'.binary == "{binary_value}"'])
+    if filter_field is not None and filter_value is not None:
+        command.extend(["FILTER", f'.{filter_field} == "{filter_value}"'])
         if filter_ef is not None:
             command.extend(["FILTER-EF", str(filter_ef)])
     result = client.execute_command(*command)
@@ -124,7 +127,8 @@ def run_single_vset_query(
     element: str,
     k: int,
     mode: str,
-    binary_value: Optional[str],
+    filter_field: Optional[str],
+    filter_value: Optional[str],
     ef_runtime: Optional[int],
     filter_ef: Optional[int],
     min_results: int,
@@ -137,7 +141,8 @@ def run_single_vset_query(
         element=element,
         k=k,
         ef_runtime=ef_runtime,
-        binary_value=binary_value if mode == "binary" else None,
+        filter_field=mode if mode != "none" else None,
+        filter_value=filter_value if mode != "none" else None,
         filter_ef=filter_ef,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
@@ -152,19 +157,31 @@ def preload_vset_queries(
     query_pool_size: int,
     duplication_factor_max: int,
     seed: int,
-) -> List[Tuple[str, str]]:
+) -> List[Tuple[str, Dict[str, str]]]:
     import random
 
     randomizer = random.Random(seed)
     seen = set()
-    queries: List[Tuple[str, str]] = []
+    client = get_redis_client(config.redis_url, health_check_interval=0, socket_keepalive=True)
+    queries: List[Tuple[str, Dict[str, str]]] = []
     while len(queries) < query_pool_size:
         player_id = randomizer.randrange(0, max_player_id)
         if player_id in seen:
             continue
         seen.add(player_id)
-        profile_id = player_id // duplication_factor_max
-        queries.append((vset_element(player_id), binary_value_for_profile(profile_id)))
+        key = f"{config.key_prefix}{player_id}"
+        field1, field2 = client.hmget(key, "field1", "field2")
+        if field1 is None or field2 is None:
+            continue
+        queries.append(
+            (
+                vset_element(player_id),
+                {
+                    "field1": field1.decode("utf-8") if isinstance(field1, bytes) else str(field1),
+                    "field2": field2.decode("utf-8") if isinstance(field2, bytes) else str(field2),
+                },
+            )
+        )
     return queries
 
 
@@ -206,7 +223,7 @@ def run_vset_benchmark(
                 target_time = started_at + (submitted / float(qps))
                 if now < target_time:
                     break
-                element, binary_value = query_pool[randomizer.randrange(0, len(query_pool))]
+                element, fields = query_pool[randomizer.randrange(0, len(query_pool))]
                 future = executor.submit(
                     run_single_vset_query,
                     config.redis_url,
@@ -214,7 +231,8 @@ def run_vset_benchmark(
                     element,
                     k,
                     mode,
-                    binary_value,
+                    mode if mode != "none" else None,
+                    fields.get(mode) if mode != "none" else None,
                     ef_runtime,
                     filter_ef,
                     k,

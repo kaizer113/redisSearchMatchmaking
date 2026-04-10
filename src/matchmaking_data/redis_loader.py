@@ -1,4 +1,3 @@
-import json
 from typing import Dict, Iterable, List, Optional
 
 import numpy as np
@@ -43,10 +42,10 @@ def create_index(client, config: PipelineConfig) -> None:
         "1",
         config.key_prefix,
         "SCHEMA",
-        "binary",
+        "field1",
         "TAG",
-        "SORTABLE",
-        "UNF",
+        "field2",
+        "TAG",
         "embedding",
         "VECTOR",
         config.vector_algorithm,
@@ -88,7 +87,7 @@ def load_batch(client, config: PipelineConfig, players: List[Dict[str, object]])
     for player in players:
         mapping = {}
         for key, value in player.items():
-            if key == "player_id" or key == "profile_text":
+            if key == "profile_text":
                 continue
             if key == "embedding":
                 mapping[key] = _vector_bytes(value)
@@ -127,10 +126,10 @@ def knn_query(
         "ASC",
         "RETURN",
         "4",
-        "username",
-        "game",
-        "platform",
-        "rank_tier",
+        "player_id",
+        "last_login",
+        "field1",
+        "field2",
         "DIALECT",
         "2",
     )
@@ -140,7 +139,7 @@ def verify_redis_stack(client) -> None:
     client.execute_command("PING")
     modules = client.execute_command("MODULE", "LIST")
     lowered = repr(modules).lower()
-    if "search" not in lowered or "rejson" not in lowered:
+    if "search" not in lowered:
         module_names = []
         for module in modules:
             if isinstance(module, list):
@@ -153,6 +152,6 @@ def verify_redis_stack(client) -> None:
                             module_names.append(str(raw_name))
         raise RuntimeError(
             f"Required Redis modules not detected on {client.connection_pool.connection_kwargs.get('host', 'the configured Redis server')}. "
-            "Expected RediSearch and RedisJSON, found: "
+            "Expected RediSearch, found: "
             + (", ".join(module_names) if module_names else "none")
         )

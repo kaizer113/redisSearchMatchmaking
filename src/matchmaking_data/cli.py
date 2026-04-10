@@ -8,7 +8,6 @@ from matchmaking_data.benchmark import run_benchmark
 from matchmaking_data.config import PipelineConfig
 from matchmaking_data.embedder import SentenceTransformerBackend, attach_embeddings, embed_profiles
 from matchmaking_data.generator import (
-    binary_value_for_profile,
     chunked,
     generate_canonical_profiles,
     iter_expanded_players,
@@ -264,14 +263,10 @@ def cmd_query(args: argparse.Namespace) -> int:
     )[0].tolist()
 
     filters: Dict[str, str] = {}
-    if args.game:
-        filters["game"] = args.game
-    if args.platform:
-        filters["platform"] = args.platform
-    if args.region:
-        filters["region"] = args.region
-    if args.rank_tier:
-        filters["rank_tier"] = args.rank_tier
+    if args.field1 is not None:
+        filters["field1"] = str(args.field1)
+    if args.field2 is not None:
+        filters["field2"] = str(args.field2)
 
     results = knn_query(client, config, query_vector=vector, k=args.k, filters=filters)
     print(results)
@@ -290,12 +285,10 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         max_player_id=args.max_player_id,
         k=args.k,
         query_pool_size=args.query_pool_size,
-        prefilter_field=args.prefilter_field,
-        aggregate_limit=args.aggregate_limit,
+        filter_field=args.filter_field,
+        filter_value=(str(args.filter_value) if args.filter_value is not None else None),
         ef_runtime=args.ef_runtime,
-        write_qps=args.write_qps,
         write_pool_size=args.write_pool_size,
-        query_binary_value=args.query_binary_value,
         seed=args.seed,
     )
     print("sample_command=")
@@ -305,48 +298,20 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         print(result.sample_write_command)
     print(f"requested_qps={result.requested_qps}")
     print(f"achieved_qps={result.achieved_qps:.2f}")
-    if result.requested_write_qps > 0:
-        print(f"requested_write_qps={result.requested_write_qps}")
-        print(f"achieved_write_qps={result.achieved_write_qps:.2f}")
+    print(f"requested_write_qps={result.requested_write_qps}")
+    print(f"achieved_write_qps={result.achieved_write_qps:.2f}")
     print(f"duration_seconds={result.duration_seconds:.2f}")
     print(f"total_requests={result.total_requests}")
     print(f"successful_requests={result.successful_requests}")
     print(f"failed_requests={result.failed_requests}")
-    if result.requested_write_qps > 0:
-        print(f"total_writes={result.total_writes}")
-        print(f"successful_writes={result.successful_writes}")
-        print(f"failed_writes={result.failed_writes}")
+    print(f"total_writes={result.total_writes}")
+    print(f"successful_writes={result.successful_writes}")
+    print(f"failed_writes={result.failed_writes}")
     print(f"min_ms={result.min_ms:.2f}")
     print(f"p50_ms={result.p50_ms:.2f}")
     print(f"p95_ms={result.p95_ms:.2f}")
     print(f"p99_ms={result.p99_ms:.2f}")
     print(f"max_ms={result.max_ms:.2f}")
-    return 0
-
-
-def cmd_rewrite_binary(args: argparse.Namespace) -> int:
-    config = _build_config(args)
-    client = get_redis_client(config.redis_url)
-    verify_redis_stack(client)
-
-    updated = 0
-    batch_size = args.batch_size
-    end_player_id = args.start_player_id + config.total_players
-
-    for batch_start in range(args.start_player_id, end_player_id, batch_size):
-        batch_end = min(batch_start + batch_size, end_player_id)
-        pipe = client.pipeline(transaction=False)
-        for player_id in range(batch_start, batch_end):
-            player_key = f"{config.key_prefix}{player_id}"
-            profile_id = player_id // args.duplication_factor_max
-            binary_value = binary_value_for_profile(profile_id)
-            pipe.hset(player_key, "binary", binary_value)
-        pipe.execute()
-        updated += batch_end - batch_start
-        if updated % max(100_000, batch_size) == 0 or updated == config.total_players:
-            print(f"Rewrote {updated} binary fields", file=sys.stderr)
-
-    print(f"Finished rewriting binary field for {updated} players")
     return 0
 
 
@@ -449,16 +414,17 @@ def cmd_benchmark_vset(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Synthetic matchmaking dataset pipeline")
     parser.set_defaults(func=None)
+    defaults = PipelineConfig()
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--redis-url", default=os.getenv("REDIS_URL", "redis://localhost:6379"))
-    common.add_argument("--index-name", default=os.getenv("INDEX_NAME", "idx:players"))
-    common.add_argument("--total-players", type=int, default=10_000_000)
-    common.add_argument("--canonical-profile-count", type=int, default=1_000_000)
-    common.add_argument("--duplication-factor-max", type=int, default=10)
-    common.add_argument("--batch-size", type=int, default=500)
-    common.add_argument("--seed", type=int, default=1337)
-    common.add_argument("--vector-set-key", default=os.getenv("VECTOR_SET_KEY", "vset:players"))
+    common.add_argument("--redis-url", default=os.getenv("REDIS_URL", defaults.redis_url))
+    common.add_argument("--index-name", default=os.getenv("INDEX_NAME", defaults.index_name))
+    common.add_argument("--total-players", type=int, default=defaults.total_players)
+    common.add_argument("--canonical-profile-count", type=int, default=defaults.canonical_profile_count)
+    common.add_argument("--duplication-factor-max", type=int, default=defaults.duplication_factor_max)
+    common.add_argument("--batch-size", type=int, default=defaults.batch_size)
+    common.add_argument("--seed", type=int, default=defaults.random_seed)
+    common.add_argument("--vector-set-key", default=os.getenv("VECTOR_SET_KEY", defaults.vector_set_key))
     common.add_argument(
         "--vector-algorithm",
         choices=["HNSW", "SVS-VAMANA"],
@@ -506,29 +472,28 @@ def build_parser() -> argparse.ArgumentParser:
     query_parser = subparsers.add_parser("query", parents=[common])
     query_parser.add_argument("--text", required=True)
     query_parser.add_argument("--k", type=int, default=10)
-    query_parser.add_argument("--game")
-    query_parser.add_argument("--platform")
-    query_parser.add_argument("--region")
-    query_parser.add_argument("--rank-tier")
+    query_parser.add_argument("--field1", choices=[0, 1], type=int)
+    query_parser.add_argument("--field2", choices=[0, 1], type=int)
     query_parser.set_defaults(func=cmd_query)
 
     benchmark_parser = subparsers.add_parser("benchmark", parents=[common])
     benchmark_parser.add_argument("--qps", type=int, default=1000)
     benchmark_parser.add_argument("--duration-seconds", type=int, default=30)
     benchmark_parser.add_argument("--concurrency", type=int, default=128)
-    benchmark_parser.add_argument("--max-player-id", type=int, default=10_000_000)
+    benchmark_parser.add_argument("--max-player-id", type=int, default=defaults.total_players)
     benchmark_parser.add_argument("--k", type=int, default=50)
     benchmark_parser.add_argument("--query-pool-size", type=int, default=20)
     benchmark_parser.add_argument(
-        "--prefilter-field",
-        choices=["none", "binary", "postfilter"],
+        "--filter-field",
+        choices=["none", "field1", "field2"],
         default="none",
     )
     benchmark_parser.add_argument(
-        "--aggregate-limit",
+        "--filter-value",
+        choices=[0, 1],
         type=int,
-        default=10_000,
-        help="KNN candidate pool for postfilter aggregate benchmarks.",
+        default=None,
+        help="Optional fixed value to use when filtering by field1 or field2.",
     )
     benchmark_parser.add_argument(
         "--ef-runtime",
@@ -537,21 +502,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override HNSW EF_RUNTIME or SVS-VAMANA SEARCH_WINDOW_SIZE at query time.",
     )
     benchmark_parser.add_argument(
-        "--write-qps",
-        type=int,
-        default=0,
-        help="Background overwrite rate during the benchmark.",
-    )
-    benchmark_parser.add_argument(
         "--write-pool-size",
         type=int,
         default=30,
-        help="Number of existing keys to preload and rewrite repeatedly during the benchmark.",
-    )
-    benchmark_parser.add_argument(
-        "--query-binary-value",
-        default=None,
-        help="Restrict query-vector preload and background write pool to a specific binary bucket value.",
+        help="Number of preloaded 100-record write batches to cycle through.",
     )
     benchmark_parser.set_defaults(func=cmd_benchmark)
 
@@ -559,17 +513,13 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark_vset_parser.add_argument("--qps", type=int, default=1000)
     benchmark_vset_parser.add_argument("--duration-seconds", type=int, default=30)
     benchmark_vset_parser.add_argument("--concurrency", type=int, default=128)
-    benchmark_vset_parser.add_argument("--max-player-id", type=int, default=1_000_000)
+    benchmark_vset_parser.add_argument("--max-player-id", type=int, default=defaults.total_players)
     benchmark_vset_parser.add_argument("--k", type=int, default=50)
     benchmark_vset_parser.add_argument("--query-pool-size", type=int, default=20)
     benchmark_vset_parser.add_argument("--ef-runtime", type=int, default=64)
     benchmark_vset_parser.add_argument("--filter-ef", type=int, default=1000)
-    benchmark_vset_parser.add_argument("--mode", choices=["none", "binary"], default="none")
+    benchmark_vset_parser.add_argument("--mode", choices=["none", "field1", "field2"], default="none")
     benchmark_vset_parser.set_defaults(func=cmd_benchmark_vset)
-
-    rewrite_binary_parser = subparsers.add_parser("rewrite-binary", parents=[common])
-    rewrite_binary_parser.add_argument("--start-player-id", type=int, default=0)
-    rewrite_binary_parser.set_defaults(func=cmd_rewrite_binary)
 
     return parser
 

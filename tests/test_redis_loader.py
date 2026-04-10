@@ -15,7 +15,7 @@ class FakeRedis:
         if args == ("FT._LIST",):
             return []
         if args[:2] == ("MODULE", "LIST"):
-            return [[b"name", b"search"], [b"name", b"ReJSON"]]
+            return [[b"name", b"search"]]
         if args == ("PING",):
             return b"PONG"
         return b"OK"
@@ -50,10 +50,12 @@ class RedisLoaderUnitTests(unittest.TestCase):
         joined = " ".join(str(part) for part in client.commands[-1])
         self.assertIn("VECTOR HNSW", joined)
         self.assertIn("DISTANCE_METRIC L2", joined)
-        self.assertIn("DIM 64", joined)
+        self.assertIn("DIM 50", joined)
         self.assertIn("ON HASH", joined)
-        self.assertIn("binary TAG SORTABLE UNF", joined)
-        self.assertNotIn("username", joined)
+        self.assertIn("field1 TAG", joined)
+        self.assertIn("field2 TAG", joined)
+        self.assertIn("M 64", joined)
+        self.assertIn("EF_CONSTRUCTION 400", joined)
 
     def test_create_index_uses_vamana_when_requested(self):
         config = PipelineConfig(index_name="idx:players:vamana", vector_algorithm="SVS-VAMANA")
@@ -66,14 +68,15 @@ class RedisLoaderUnitTests(unittest.TestCase):
         self.assertIn("SEARCH_WINDOW_SIZE 64", joined)
         self.assertNotIn(" EF_RUNTIME ", joined)
 
-    def test_load_batch_omits_player_id_from_json_payload(self):
+    def test_load_batch_keeps_player_id_and_serializes_embedding(self):
         config = PipelineConfig()
         client = FakeRedis()
         players = [
             {
                 "player_id": 7,
-                "username": "Nova",
-                "game": "valorant",
+                "last_login": 1_700_000_000,
+                "field1": 1,
+                "field2": 0,
                 "embedding": [0.1, 0.2],
             }
         ]
@@ -82,7 +85,7 @@ class RedisLoaderUnitTests(unittest.TestCase):
         command = client.last_pipeline.commands[0]
         self.assertEqual("HSET", command[0])
         self.assertEqual("player:7", command[1])
-        self.assertNotIn("player_id", command[2])
+        self.assertIn("player_id", command[2])
         self.assertIsInstance(command[2]["embedding"], bytes)
 
 

@@ -39,7 +39,7 @@ class ThreadedLoaderTests(unittest.TestCase):
             total_players=38,
         )
         self.assertEqual([34, 35, 36, 37], [player["player_id"] for player in players])
-        self.assertTrue(all("username" in player for player in players))
+        self.assertTrue(all("field1" in player and "field2" in player for player in players))
 
 
 if __name__ == "__main__":
