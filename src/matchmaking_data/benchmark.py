@@ -74,6 +74,10 @@ def escape_tag_value(value: str) -> str:
     return "".join(escaped)
 
 
+def escape_aggregate_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def fetch_player_embedding(client, config: PipelineConfig, player_id: int) -> bytes:
     value = client.hget(player_key(config.key_prefix, player_id), "embedding")
     if value is None:
@@ -177,9 +181,19 @@ def build_sample_command(
     filter_field: str,
     filter_value: Optional[str],
     ef_runtime: Optional[int],
+    filter_mode: str = "prefilter",
+    aggregate_limit: int = 10_000,
 ) -> str:
     runtime_clause = _runtime_clause(config, ef_runtime)
     vector_arg = shell_escape_binary(query_vector)
+    if filter_mode == "postfilter" and filter_field != "none" and filter_value is not None:
+        query = f"*=>[KNN {aggregate_limit} @embedding $vector{runtime_clause} AS score]"
+        filter_expr = f"@{filter_field}=='{escape_aggregate_string(filter_value)}'"
+        return (
+            f"redis-cli FT.AGGREGATE {config.index_name} '{query}' "
+            f"PARAMS 2 vector {vector_arg} LOAD 3 __key @{filter_field} @score "
+            f"FILTER '{filter_expr}' SORTBY 2 @score ASC LIMIT 0 {k} DIALECT 2"
+        )
     query = f"*=>[KNN {k} @embedding $vector{runtime_clause} AS score]"
     if filter_field != "none" and filter_value is not None:
         query = (
@@ -243,6 +257,47 @@ def knn_query_from_bytes(
     return int(result[0]) if result else 0
 
 
+def aggregate_postfilter_query_from_bytes(
+    client,
+    config: PipelineConfig,
+    query_vector: bytes,
+    k: int,
+    filter_field: str,
+    filter_value: str,
+    aggregate_limit: int,
+    ef_runtime: Optional[int],
+) -> int:
+    runtime_clause = _runtime_clause(config, ef_runtime)
+    query = f"*=>[KNN {aggregate_limit} @embedding $vector{runtime_clause} AS score]"
+    filter_expr = f"@{filter_field}=='{escape_aggregate_string(filter_value)}'"
+    result = client.execute_command(
+        "FT.AGGREGATE",
+        config.index_name,
+        query,
+        "PARAMS",
+        "2",
+        "vector",
+        query_vector,
+        "LOAD",
+        "3",
+        "__key",
+        f"@{filter_field}",
+        "@score",
+        "FILTER",
+        filter_expr,
+        "SORTBY",
+        "2",
+        "@score",
+        "ASC",
+        "LIMIT",
+        "0",
+        str(k),
+        "DIALECT",
+        "2",
+    )
+    return int(result[0]) if result else 0
+
+
 def run_single_query(
     redis_url: str,
     config: PipelineConfig,
@@ -251,6 +306,8 @@ def run_single_query(
     filter_field: str = "none",
     filter_value: Optional[str] = None,
     ef_runtime: Optional[int] = None,
+    filter_mode: str = "prefilter",
+    aggregate_limit: int = 10_000,
     min_results: int = 1,
 ) -> float:
     client = getattr(_THREAD_LOCAL, "client", None)
@@ -264,15 +321,27 @@ def run_single_query(
         _THREAD_LOCAL.client = client
         _THREAD_LOCAL.redis_url = redis_url
     started = time.perf_counter()
-    count = knn_query_from_bytes(
-        client,
-        config,
-        query_vector,
-        k=expected_k,
-        ef_runtime=ef_runtime,
-        filter_field=filter_field,
-        filter_value=filter_value,
-    )
+    if filter_mode == "postfilter" and filter_field != "none" and filter_value is not None:
+        count = aggregate_postfilter_query_from_bytes(
+            client,
+            config,
+            query_vector,
+            k=expected_k,
+            filter_field=filter_field,
+            filter_value=filter_value,
+            aggregate_limit=aggregate_limit,
+            ef_runtime=ef_runtime,
+        )
+    else:
+        count = knn_query_from_bytes(
+            client,
+            config,
+            query_vector,
+            k=expected_k,
+            ef_runtime=ef_runtime,
+            filter_field=filter_field,
+            filter_value=filter_value,
+        )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     if count < min_results:
         raise RuntimeError(f"Expected at least {min_results} matches, received {count}")
@@ -310,6 +379,8 @@ def run_benchmark(
     filter_field: str = "none",
     filter_value: Optional[str] = None,
     ef_runtime: Optional[int] = None,
+    filter_mode: str = "prefilter",
+    aggregate_limit: int = 10_000,
     write_qps: int = WRITE_BATCHES_PER_SECOND,
     write_pool_size: int = 30,
     seed: int = 1337,
@@ -366,6 +437,8 @@ def run_benchmark(
                         filter_field=filter_field,
                         filter_value=active_filter_value,
                         ef_runtime=ef_runtime,
+                        filter_mode=filter_mode,
+                        aggregate_limit=aggregate_limit,
                     )
                 min_results = 1 if filter_field != "none" else k
                 future = executor.submit(
@@ -377,6 +450,8 @@ def run_benchmark(
                     filter_field,
                     active_filter_value,
                     ef_runtime,
+                    filter_mode,
+                    aggregate_limit,
                     min_results,
                 )
                 in_flight.add(future)

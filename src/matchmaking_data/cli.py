@@ -288,6 +288,8 @@ def cmd_benchmark(args: argparse.Namespace) -> int:
         filter_field=args.filter_field,
         filter_value=(str(args.filter_value) if args.filter_value is not None else None),
         ef_runtime=args.ef_runtime,
+        filter_mode=args.filter_mode,
+        aggregate_limit=args.aggregate_limit,
         write_qps=args.write_qps,
         write_pool_size=args.write_pool_size,
         seed=args.seed,
@@ -501,6 +503,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Override HNSW EF_RUNTIME or SVS-VAMANA SEARCH_WINDOW_SIZE at query time.",
+    )
+    benchmark_parser.add_argument(
+        "--filter-mode",
+        choices=["prefilter", "postfilter"],
+        default="prefilter",
+        help="Use FT.SEARCH prefiltering or FT.AGGREGATE postfiltering when a filter field is set.",
+    )
+    benchmark_parser.add_argument(
+        "--aggregate-limit",
+        type=int,
+        default=10_000,
+        help="KNN candidate pool for postfilter aggregate benchmarks.",
     )
     benchmark_parser.add_argument(
         "--write-qps",

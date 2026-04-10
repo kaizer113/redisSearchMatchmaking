@@ -7,6 +7,7 @@ from matchmaking_data.benchmark import (
     _runtime_clause,
     build_sample_command,
     build_sample_write_command,
+    escape_aggregate_string,
     escape_tag_value,
     percentile,
 )
@@ -51,6 +52,9 @@ class BenchmarkTests(unittest.TestCase):
     def test_escape_tag_value(self):
         self.assertEqual(r"abc\+\/\=", escape_tag_value("abc+/="))
 
+    def test_escape_aggregate_string(self):
+        self.assertEqual(r"a\\b\'c", escape_aggregate_string("a\\b'c"))
+
     def test_runtime_clause_for_hnsw(self):
         config = PipelineConfig(vector_algorithm="HNSW")
         self.assertEqual(" EF_RUNTIME 16", _runtime_clause(config, 16))
@@ -72,6 +76,22 @@ class BenchmarkTests(unittest.TestCase):
         self.assertIn("FT.SEARCH idx:players", command)
         self.assertIn("@field1:{1}", command)
         self.assertIn("EF_RUNTIME 64", command)
+        self.assertIn("LIMIT 0 50", command)
+
+    def test_build_sample_command_for_postfilter(self):
+        config = PipelineConfig(index_name="idx:players")
+        command = build_sample_command(
+            config=config,
+            query_vector=b"\x01\x02",
+            k=50,
+            filter_field="field1",
+            filter_value="1",
+            ef_runtime=64,
+            filter_mode="postfilter",
+            aggregate_limit=10000,
+        )
+        self.assertIn("FT.AGGREGATE idx:players", command)
+        self.assertIn("FILTER '@field1=='", command)
         self.assertIn("LIMIT 0 50", command)
 
     def test_build_sample_command_without_filter(self):
