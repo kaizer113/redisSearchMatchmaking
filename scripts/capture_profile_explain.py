@@ -23,9 +23,18 @@ def escape_aggregate_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def build_queries(index_name: str, binary_text: str, k: int, aggregate_limit: int, ef_runtime: int):
-    escaped_binary = escape_tag_value(binary_text)
-    filter_expr = "@binary=='{}'".format(escape_aggregate_string(binary_text))
+def build_queries(
+    index_name: str,
+    filters: list[tuple[str, str]],
+    k: int,
+    ef_runtime: int,
+):
+    filter_prefix = " ".join(
+        f"@{field}:{{{escape_tag_value(value)}}}" for field, value in filters
+    )
+    if len(filters) > 1:
+        filter_prefix = f"({filter_prefix})"
+    filtered_query = f"{filter_prefix}=>[KNN {k} @embedding $vector EF_RUNTIME {ef_runtime} AS score]"
     return {
         "unfiltered": {
             "type": "SEARCH",
@@ -40,7 +49,7 @@ def build_queries(index_name: str, binary_text: str, k: int, aggregate_limit: in
         },
         "prefilter": {
             "type": "SEARCH",
-            "query": f"@binary:{{{escaped_binary}}}=>[KNN {k} @embedding $vector EF_RUNTIME {ef_runtime} AS score]",
+            "query": filtered_query,
             "command_tail": [
                 "PARAMS", "2", "vector", "<256-byte-vector>",
                 "SORTBY", "score", "ASC",
@@ -48,19 +57,6 @@ def build_queries(index_name: str, binary_text: str, k: int, aggregate_limit: in
                 "LIMIT", "0", str(k),
                 "DIALECT", "2",
             ],
-        },
-        "postfilter": {
-            "type": "AGGREGATE",
-            "query": f"*=>[KNN {aggregate_limit} @embedding $vector EF_RUNTIME {ef_runtime} AS score]",
-            "command_tail": [
-                "PARAMS", "2", "vector", "<256-byte-vector>",
-                "LOAD", "3", "__key", "@binary", "@score",
-                "FILTER", filter_expr,
-                "SORTBY", "2", "@score", "ASC",
-                "LIMIT", "0", str(k),
-                "DIALECT", "2",
-            ],
-            "filter_expr": filter_expr,
         },
     }
 
@@ -77,8 +73,9 @@ def main() -> int:
     parser.add_argument("--index-name", default="idx:players")
     parser.add_argument("--player-id", type=int, default=0)
     parser.add_argument("--k", type=int, default=50)
-    parser.add_argument("--aggregate-limit", type=int, default=10000)
     parser.add_argument("--ef-runtime", type=int, default=64)
+    parser.add_argument("--field1-value", choices=["0", "1"], default=None)
+    parser.add_argument("--field2-value", choices=["0", "1"], default=None)
     parser.add_argument(
         "--output",
         default="artifacts/ft_profile_explain_ef64.txt",
@@ -89,23 +86,27 @@ def main() -> int:
     client = Redis.from_url(args.redis_url, decode_responses=False)
     key = f"player:{args.player_id}"
     vector = client.hget(key, "embedding")
-    binary = client.hget(key, "binary")
+    raw_field1 = client.hget(key, "field1")
+    raw_field2 = client.hget(key, "field2")
 
     if vector is None:
         raise SystemExit(f"Missing embedding for {key}")
-    if binary is None:
-        raise SystemExit(f"Missing binary for {key}")
+    if raw_field1 is None and args.field1_value is None:
+        raise SystemExit(f"Missing field1 for {key}")
+    if raw_field2 is None and args.field2_value is None:
+        raise SystemExit(f"Missing field2 for {key}")
 
-    explain_vector = client.hget("player:1000437", "embedding")
+    explain_vector = client.hget(key, "embedding")
     if explain_vector is None:
-        raise SystemExit("Missing embedding for player:1000437 (used for FT.EXPLAIN PARAMS)")
+        raise SystemExit(f"Missing embedding for {key} (used for FT.EXPLAIN PARAMS)")
 
-    binary_text = binary.decode("utf-8")
+    field1_value = args.field1_value if args.field1_value is not None else raw_field1.decode("utf-8")
+    field2_value = args.field2_value if args.field2_value is not None else raw_field2.decode("utf-8")
+    filters = [("field1", field1_value), ("field2", field2_value)]
     queries = build_queries(
         index_name=args.index_name,
-        binary_text=binary_text,
+        filters=filters,
         k=args.k,
-        aggregate_limit=args.aggregate_limit,
         ef_runtime=args.ef_runtime,
     )
 
@@ -118,9 +119,9 @@ def main() -> int:
     lines.append(f"redis_url={args.redis_url}")
     lines.append(f"index_name={args.index_name}")
     lines.append(f"player_id={args.player_id}")
-    lines.append(f"binary={binary_text}")
+    lines.append(f"field1={field1_value}")
+    lines.append(f"field2={field2_value}")
     lines.append(f"k={args.k}")
-    lines.append(f"aggregate_limit={args.aggregate_limit}")
     lines.append(f"ef_runtime={args.ef_runtime}")
     lines.append("")
 
@@ -152,45 +153,6 @@ def main() -> int:
                 "score",
                 "ASC",
                 "NOCONTENT",
-                "LIMIT",
-                "0",
-                str(args.k),
-                "DIALECT",
-                "2",
-            )
-        else:
-            try:
-                aggregate_explain = client.execute_command("FT.EXPLAIN", args.index_name, query, "PARAMS", "2", "vector", explain_vector, "DIALECT", "2")
-                if isinstance(aggregate_explain, bytes):
-                    aggregate_explain = aggregate_explain.decode("utf-8", errors="replace")
-                explain = (
-                    "FT.EXPLAIN only describes the KNN query string. "
-                    "For AGGREGATE, the full pipeline is represented in FT.PROFILE below.\n\n"
-                    + aggregate_explain
-                )
-            except ResponseError as exc:
-                explain = f"FT.EXPLAIN error:\n{exc}"
-            profile = client.execute_command(
-                "FT.PROFILE",
-                args.index_name,
-                "AGGREGATE",
-                "QUERY",
-                query,
-                "PARAMS",
-                "2",
-                "vector",
-                vector,
-                "LOAD",
-                "3",
-                "__key",
-                "@binary",
-                "@score",
-                "FILTER",
-                query_info["filter_expr"],
-                "SORTBY",
-                "2",
-                "@score",
-                "ASC",
                 "LIMIT",
                 "0",
                 str(args.k),

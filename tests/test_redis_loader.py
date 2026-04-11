@@ -63,8 +63,8 @@ class RedisLoaderUnitTests(unittest.TestCase):
         create_index(client, config)
         joined = " ".join(str(part) for part in client.commands[-1])
         self.assertIn("VECTOR SVS-VAMANA", joined)
-        self.assertIn("GRAPH_MAX_DEGREE 32", joined)
-        self.assertIn("CONSTRUCTION_WINDOW_SIZE 200", joined)
+        self.assertIn("GRAPH_MAX_DEGREE 128", joined)
+        self.assertIn("CONSTRUCTION_WINDOW_SIZE 400", joined)
         self.assertIn("SEARCH_WINDOW_SIZE 64", joined)
         self.assertNotIn(" EF_RUNTIME ", joined)
 

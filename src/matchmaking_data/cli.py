@@ -41,6 +41,12 @@ def _build_config(args: argparse.Namespace) -> PipelineConfig:
         embedding_model_name=args.model_name,
         vector_set_key=args.vector_set_key,
         vector_algorithm=args.vector_algorithm,
+        hnsw_m=args.hnsw_m,
+        hnsw_ef_construction=args.hnsw_ef_construction,
+        hnsw_ef_runtime=args.hnsw_ef_runtime,
+        vamana_graph_max_degree=args.vamana_graph_max_degree,
+        vamana_construction_window_size=args.vamana_construction_window_size,
+        vamana_search_window_size=args.vamana_search_window_size,
     )
 
 
@@ -432,6 +438,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--vector-algorithm",
         choices=["HNSW", "SVS-VAMANA"],
         default="HNSW",
+    )
+    common.add_argument("--hnsw-m", type=int, default=defaults.hnsw_m)
+    common.add_argument("--hnsw-ef-construction", type=int, default=defaults.hnsw_ef_construction)
+    common.add_argument("--hnsw-ef-runtime", type=int, default=defaults.hnsw_ef_runtime)
+    common.add_argument("--vamana-graph-max-degree", type=int, default=defaults.vamana_graph_max_degree)
+    common.add_argument(
+        "--vamana-construction-window-size",
+        type=int,
+        default=defaults.vamana_construction_window_size,
+    )
+    common.add_argument(
+        "--vamana-search-window-size",
+        type=int,
+        default=defaults.vamana_search_window_size,
     )
     common.add_argument(
         "--model-name",
